@@ -84,6 +84,19 @@ dated; the Feb 2026 API overhaul obsoleted most older figures.
 6. Instrument our own counters (no reliable rate-limit headers exist);
    log daily per-endpoint totals to back into the real cliff empirically.
 
+## Retry-After accessibility (why people think it's missing)
+
+- The header IS on the wire; browser JS just can't read it because Spotify
+  never sets `Access-Control-Expose-Headers: Retry-After` — a 2022 feature
+  request staff investigated and silently dropped (community thread, mined
+  2026-07-23). Server-side clients receive it.
+- spotipy then swallows it: 429 sits in its `default_retry_codes`, so
+  urllib3 sleeps on the header INSIDE the request and, once retries exhaust,
+  surfaces a RetryError with no response attached (spotipy #1224, #577).
+  Library users conclude "no Retry-After" — it was consumed internally. Our
+  scripts zero the retry config and rebuild the session (phantom_audit.py)
+  so the header reaches our own handler.
+
 ## Open questions (nobody knows)
 
 - The actual requests-per-30s number for dev mode.
