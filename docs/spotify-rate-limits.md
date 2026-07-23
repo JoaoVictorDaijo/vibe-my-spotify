@@ -29,10 +29,21 @@ dated; the Feb 2026 API overhaul obsoleted most older figures.
   constraint is the daily bucket, not the per-second rate** — polite pacing
   still ends in a multi-hour ban once the bucket empties.
 - Measured per-endpoint daily budgets (community, primary sources):
-  `/v1/tracks` ≈ **600 requests/24h** before a ban (2026-05, ≥1s spacing);
-  recommendations ≈ 200/24h (2024, endpoint now dead). `/search` numbers:
-  never measured publicly — ours (~900 in 1.5h → 13h ban) is the only data
-  point we have.
+  `/v1/tracks` ≈ **600 requests/24h** before a ban (2026-05, ≥1s spacing,
+  cold-start app); recommendations ≈ 200/24h (2024, endpoint now dead).
+  `/search` numbers: never measured publicly — ours (~900 in 1.5h → 13h ban)
+  is the only data point we have.
+- **The adaptive-ceiling model (r/spotifyapi, 2026-06, unverified but
+  use-case-identical):** the rolling-30s limit is dynamic per app and per
+  endpoint and GROWS with sustained gradual usage — start ~100 req/min and
+  ramp volume day by day over weeks; one dev claims ~1M req/day eventually on
+  a personal playlist tool. Corollary: daily cliffs like the 600 figure are
+  cold-start values, not fixed ceilings — cultivate quota, never burst.
+  Counterpoint from the same thread: a flat 10s-between-calls pace still
+  eventually earned a 12-15h lockout, so slow pacing alone is not a cure.
+- Write item caps appear endpoint-specific: playlist adds historically 100
+  URIs/call; `/me/tracks?ids=` reported cut 50 → 40. We chunk all writes at
+  ≤40 to be safe.
 - **Retry-After penalties observed: 6-24h band** (retry headers of 6-24h;
   lockouts of 12/20/23/24h; ours 46,649s ≈ 13h). Claims of 48h exist in one
   unmined thread but are unconfirmed. Penalties can be endpoint-scoped or
