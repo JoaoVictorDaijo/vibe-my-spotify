@@ -9,3 +9,6 @@ spotify-mcp/.cache
 .venv/
 __pycache__/
 *.pyc
+
+# Personal playlist data / curation plans — never publish
+curation-review/
