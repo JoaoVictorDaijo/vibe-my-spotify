@@ -29,7 +29,9 @@ from spotify_mcp import spotify_api
 # We disable internal retries and pace requests ourselves. A Retry-After
 # beyond QUOTA_STOP_SECONDS means the app-wide daily quota is exhausted —
 # checkpoint and exit so a later rerun resumes from the cache.
-PACE_SECONDS = 0.35
+# Post-Feb-2026 dev-mode apps 429 at sustained rates near 1 req/s
+# (docs/spotify-rate-limits.md) — stay under it.
+PACE_SECONDS = 1.0
 QUOTA_STOP_SECONDS = 300
 
 
@@ -43,7 +45,12 @@ def call(fn, *args, **kwargs):
             return fn(*args, **kwargs)
         except SpotifyException as e:
             if e.http_status == 429:
-                retry_after = int((getattr(e, "headers", None) or {}).get("Retry-After", 5))
+                header = (getattr(e, "headers", None) or {}).get("Retry-After")
+                if header is None:
+                    # Community consensus: a 429 without Retry-After means the
+                    # daily quota is gone; probing further extends penalties.
+                    raise QuotaExhausted("429 with no Retry-After header")
+                retry_after = int(header)
                 if retry_after > QUOTA_STOP_SECONDS:
                     raise QuotaExhausted(f"Retry-After {retry_after}s — daily quota exhausted")
                 time.sleep(retry_after)
