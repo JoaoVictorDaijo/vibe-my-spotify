@@ -20,6 +20,7 @@ import sys
 import time
 from pathlib import Path
 
+import requests
 from spotipy.exceptions import SpotifyException
 
 from spotify_mcp import spotify_api
@@ -39,9 +40,15 @@ def call(fn, *args, **kwargs):
     for _ in range(5):
         try:
             return fn(*args, **kwargs)
+        except requests.exceptions.RetryError as e:
+            # Surfaces only if spotipy's internal retry layer was left active
+            # (session not rebuilt) — the 429 response is gone at this point.
+            raise QuotaExhausted("internal retries exhausted on 429") from e
         except SpotifyException as e:
             if e.http_status == 429:
-                header = (getattr(e, "headers", None) or {}).get("Retry-After")
+                headers = getattr(e, "headers", None) or {}
+                # HTTP/2 lowercases header names; don't miss it on case.
+                header = next((v for k, v in headers.items() if k.lower() == "retry-after"), None)
                 if header is None:
                     # Community consensus: a 429 without Retry-After means the
                     # daily quota is gone; probing further extends penalties.
@@ -113,10 +120,16 @@ def main() -> None:
     out_dir = Path(sys.argv[1])
     playlists = load_exports(out_dir)
     sp = spotify_api.Client().sp
-    # Internal retries off — the call() wrapper owns 429 handling.
-    for attr in ("retries", "status_retries"):
-        if hasattr(sp, attr):
-            setattr(sp, attr, 0)
+    # spotipy wires 429 into urllib3's Retry at __init__ (default_retry_codes)
+    # and urllib3 honors Retry-After by sleeping INSIDE the request — a giant
+    # header stalls the process for hours (observed: 46,649s). Zero the retry
+    # config and REBUILD the session so 429s surface to call() immediately;
+    # setting the attributes alone does nothing to the already-built adapter.
+    sp.retries = 0
+    sp.status_retries = 0
+    sp.status_forcelist = []
+    if hasattr(sp, "_build_session"):
+        sp._build_session()
 
     cache_path = out_dir / "phantom_cache.json"
     cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}
