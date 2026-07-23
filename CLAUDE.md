@@ -42,7 +42,11 @@ extends it (up to 48h observed) and a 429 without Retry-After means the day's
 budget is gone. Extended quota mode is business-only (≥250k MAU; "AI/ML" is a
 documented rejection reason) — design inside dev mode. Judgment stages run
 off exports on disk and need no API — a penalty only blocks audits and
-applies, not analysis.
+applies, not analysis. For recording-identity questions prefer MusicBrainz
+(`/isrc/{isrc}`, free, no auth, ~1 req/s) over Spotify search; batch track
+fetches already return `external_ids.isrc` for dedup evidence. Alternatives
+landscape (Tidal = designated escape hatch):
+[docs/streaming-api-alternatives.md](docs/streaming-api-alternatives.md).
 
 ## Model tiering (owner-approved)
 
