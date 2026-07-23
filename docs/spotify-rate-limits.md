@@ -25,20 +25,34 @@ dated; the Feb 2026 API overhaul obsoleted most older figures.
 ## What the community has measured (anecdotal but consistent)
 
 - Post-Feb-2026 dev-mode 429s arrive at sub-1-req/s sustained rates; reports
-  of throttling after tens of requests (2026-02 threads). Pre-2026 figures
-  (~250/30s client-credentials, ~1000/30s auth-code, "180/min") are stale.
-- `/search` behaves like the scarcest resource with its own (unpublished,
-  low) daily cap — search-heavy apps 429 while other endpoints still work.
-- **Giant Retry-After penalties (6-48h) are normal**, documented since 2023
-  (43,200s / 31,566s / ~49,000s reports). Ours: 46,649s after ~900 `isrc:`
-  searches in ~1.5h. Penalties can be endpoint-scoped or app-wide.
-- **Calling during a penalty extends it** (reports of 13h escalating toward
-  48h). Some 429s carry no `Retry-After` at all — treat that as "day over."
-- Reset behavior: a rolling countdown from budget exhaustion, not a clean
-  midnight reset (best evidence; unconfirmed).
-- `external_id`/ISRC surfaces were reduced in early-2026 changes and the ISRC
-  path is one Spotify watches; our app still gets `external_ids.isrc` and
-  `isrc:` search hits, but treat this as fragile.
+  of throttling after tens of requests (2026-02 threads). **The binding
+  constraint is the daily bucket, not the per-second rate** — polite pacing
+  still ends in a multi-hour ban once the bucket empties.
+- Measured per-endpoint daily budgets (community, primary sources):
+  `/v1/tracks` ≈ **600 requests/24h** before a ban (2026-05, ≥1s spacing);
+  recommendations ≈ 200/24h (2024, endpoint now dead). `/search` numbers:
+  never measured publicly — ours (~900 in 1.5h → 13h ban) is the only data
+  point we have.
+- **Retry-After penalties observed: 6-24h band** (retry headers of 6-24h;
+  lockouts of 12/20/23/24h; ours 46,649s ≈ 13h). Claims of 48h exist in one
+  unmined thread but are unconfirmed. Penalties can be endpoint-scoped or
+  app-wide.
+- "Calling during a penalty extends it": **no primary-source evidence** in
+  the mined threads — treat as unproven folklore, but still don't probe
+  during a penalty (no upside). Some 429s carry no `Retry-After` at all —
+  treat that as "day over."
+- Reset timing (rolling vs fixed): **unknown** — nobody has established it.
+- **"180 requests/min" is folklore**: it originates from a third-party Mendix
+  Medium article's own testing (2023), pasted into a forum thread — never a
+  Spotify statement. The staff-accepted answer (2022) explicitly gives no
+  numbers.
+- **Batch/multiple-item READ endpoints (GET several artists/tracks, ISRC
+  surfaces) are reported deprecated/removed for dev-mode apps in Feb 2026**;
+  the `?ids=` WRITE endpoints remain (they just 429), and one user reports
+  per-call max items reduced **50 → 40**. Chunk writes at ≤40 items.
+- Staff communication timeline ends 2026-02-27 (the 8× playlist-quota bump);
+  the transparency improvements remain promises. Our app still gets
+  `external_ids.isrc` and `isrc:` search hits — treat as fragile.
 
 ## Operating rules for this app
 
@@ -46,12 +60,17 @@ dated; the Feb 2026 API overhaul obsoleted most older figures.
 2. Treat each day as a budget. Search: a few hundred calls/day, spread out,
    never bursted; cache every result permanently (each ISRC searched at most
    once, ever — phantom_cache.json).
-3. Prefer batch reads (100 tracks/page playlists, 50 liked); cache
-   `snapshot_id` and skip unchanged playlists.
-4. On ANY 429: stop the entire app, not just the endpoint. Never probe
+3. Prefer paged playlist reads (100 tracks/page, 50 liked) — these are the
+   cheapest per-track calls that exist; cache `snapshot_id` and skip
+   unchanged playlists. Chunk all writes at ≤40 items per call.
+4. If per-track fetches are needed, budget ~500/day max (measured cliff
+   ≈600/day on `/v1/tracks`) — but first check whether the playlist/liked
+   page payload already carries the field (e.g. `external_ids.isrc`,
+   `linked_from` with a market context) before spending per-track calls.
+5. On ANY 429: stop the entire app, not just the endpoint. Never probe
    during a penalty. A 429 without `Retry-After` = quota exhausted, halt for
    the day. (`phantom_audit.py` implements this via QuotaExhausted.)
-5. Instrument our own counters (no reliable rate-limit headers exist);
+6. Instrument our own counters (no reliable rate-limit headers exist);
    log daily per-endpoint totals to back into the real cliff empirically.
 
 ## Open questions (nobody knows)
