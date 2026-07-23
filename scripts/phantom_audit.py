@@ -26,9 +26,15 @@ from spotify_mcp import spotify_api
 
 # Spotify's search endpoint hands out 429s with huge Retry-After values;
 # letting spotipy's internal retry sleep on them stalls the audit for hours.
-# We disable internal retries, pace requests ourselves, and cap 429 waits.
+# We disable internal retries and pace requests ourselves. A Retry-After
+# beyond QUOTA_STOP_SECONDS means the app-wide daily quota is exhausted —
+# checkpoint and exit so a later rerun resumes from the cache.
 PACE_SECONDS = 0.35
-MAX_429_WAIT = 60
+QUOTA_STOP_SECONDS = 300
+
+
+class QuotaExhausted(RuntimeError):
+    pass
 
 
 def call(fn, *args, **kwargs):
@@ -38,7 +44,9 @@ def call(fn, *args, **kwargs):
         except SpotifyException as e:
             if e.http_status == 429:
                 retry_after = int((getattr(e, "headers", None) or {}).get("Retry-After", 5))
-                time.sleep(min(retry_after, MAX_429_WAIT))
+                if retry_after > QUOTA_STOP_SECONDS:
+                    raise QuotaExhausted(f"Retry-After {retry_after}s — daily quota exhausted")
+                time.sleep(retry_after)
             elif e.http_status in (500, 502, 503):
                 time.sleep(2)
             else:
@@ -102,6 +110,10 @@ def main() -> None:
             continue
         try:
             cache[tid] = probe_track(sp, tid)
+        except QuotaExhausted as e:
+            print(f"quota exhausted after {n}/{len(todo)} this run ({e}) — "
+                  "cache checkpointed, rerun after the window resets to resume")
+            break
         except Exception as e:  # noqa: BLE001 — leave uncached so a rerun retries it
             probe_errors += 1
             print(f"probe failed {tid}: {str(e)[:80]}")

@@ -31,13 +31,18 @@ server's spotipy client and token cache:
 - `dedup_review.py DIR OUT.md` — checkbox review file from dedup + ISRC evidence
 
 Feb 2026 API notes: playlist items nest the track under `"item"`; batch GET
-endpoints are gone; search caps at 10 results. Dev-mode apps have a SMALL
-app-wide daily quota — ~900 searches in one run earned a ~13h penalty box
-(Retry-After ≈ 46000s on every endpoint). Never run per-track search sweeps:
-audit with the relink signal (1 track fetch each) and reserve ISRC searches
-for targeted cases (fuzzy-group members, flagged tracks). Judgment stages run
-off exports on disk and need no API — a penalty only blocks audits and
-applies, not analysis.
+endpoints are gone; search caps at 10 results. Rate limits are UNPUBLISHED
+(official docs say only "rolling 30-second window"; dev vs extended quota
+modes differ). Measured on this dev-mode app: ~2-3 req/s sustained is fine on
+track/playlist endpoints, but ~900 searches in one run earned an app-wide
+~13h penalty (Retry-After ≈ 46000s). The only official increase path is
+extended quota mode via a Partner Application (org-oriented review, up to 6
+weeks) — not viable for a personal tool, so design inside the dev quota:
+audit with the relink signal (1 track fetch each), reserve ISRC searches for
+targeted cases, and let phantom_audit.py's QuotaExhausted checkpoint spread
+big sweeps across daily quota windows. Judgment stages run off exports on
+disk and need no API — a penalty only blocks audits and applies, not
+analysis.
 
 ## Model tiering (owner-approved)
 
