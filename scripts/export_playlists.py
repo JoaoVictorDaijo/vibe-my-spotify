@@ -45,8 +45,19 @@ def _parse_items(items: list, offset: int) -> list[dict]:
     return tracks
 
 
-def export_playlist(sp, pid: str) -> dict:
-    info = sp.playlist(pid)
+def find_existing(out_dir: Path, pid: str) -> dict | None:
+    for p in out_dir.glob("*.json"):
+        try:
+            data = json.loads(p.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        if isinstance(data, dict) and data.get("id") == pid:
+            return data
+    return None
+
+
+def export_playlist(sp, pid: str, info: dict | None = None) -> dict:
+    info = info or sp.playlist(pid)
     tracks = []
     offset = 0
     while True:
@@ -105,7 +116,16 @@ def main() -> None:
 
     sp = spotify_api.Client().sp
     args.out.mkdir(parents=True, exist_ok=True)
-    datasets = [export_playlist(sp, pid) for pid in args.playlist_ids]
+    datasets = []
+    for pid in args.playlist_ids:
+        # snapshot_id is Spotify's playlist version marker — unchanged
+        # snapshot means the cached export is still exact, skip the paging.
+        info = sp.playlist(pid)
+        existing = find_existing(args.out, pid)
+        if existing and existing.get("snapshot_id") and existing["snapshot_id"] == info.get("snapshot_id"):
+            print(f"{info.get('name', pid)}: unchanged (snapshot match), skipped")
+            continue
+        datasets.append(export_playlist(sp, pid, info=info))
     if args.liked:
         datasets.append(export_liked(sp))
     for data in datasets:
