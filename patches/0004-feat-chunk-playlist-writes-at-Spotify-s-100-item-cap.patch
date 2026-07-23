@@ -1,0 +1,208 @@
+From fbcbc3a58167e541428262c9cfa42c27f4eb5c12 Mon Sep 17 00:00:00 2001
+From: electro-wsl <joaovictordaijo@gmail.com>
+Date: Wed, 22 Jul 2026 23:11:23 -0300
+Subject: [PATCH 4/5] feat: chunk playlist writes at Spotify's 100-item cap
+
+add_tracks_to_playlist and remove_tracks_from_playlist previously sent the
+whole URI list in one request, so any edit over 100 items failed with a 400.
+Split both into <=100-item batches in order via a shared _chunk_items helper.
+For all-occurrences removal the batches are position-independent, so each
+returned snapshot_id is threaded into the next request.
+
+remove_specific_track_occurrences is not chunked: its positions are relative
+to a single snapshot, and splitting across requests would shift them, so it
+rejects more than 100 items with a clear error instead.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+---
+ src/spotify_mcp/fastmcp_server.py | 49 ++++++++++++++++++++++++++-----
+ tests/test_fastmcp_tools.py       | 47 ++++++++++++++++++++++++++++-
+ 2 files changed, 87 insertions(+), 9 deletions(-)
+
+diff --git a/src/spotify_mcp/fastmcp_server.py b/src/spotify_mcp/fastmcp_server.py
+index 6e5d5d5..e025608 100644
+--- a/src/spotify_mcp/fastmcp_server.py
++++ b/src/spotify_mcp/fastmcp_server.py
+@@ -27,6 +27,8 @@ from spotify_mcp.logging_utils import (
+ )
+ 
+ if TYPE_CHECKING:
++    from collections.abc import Iterator
++
+     from spotify_mcp.spotify_types import (
+         AlbumObject,
+         AlbumRef,
+@@ -54,6 +56,10 @@ SPOTIFY_ICON = Icon(
+     mimeType="image/svg+xml",
+ )
+ 
++# Spotify caps playlist add/remove requests at 100 items; larger edits must be
++# split across multiple calls.
++SPOTIFY_MAX_ITEMS_PER_REQUEST = 100
++
+ # Initialize Spotify client
+ _client_wrapper = spotify_api.Client()
+ spotify_client = _client_wrapper.sp  # Use spotipy client directly
+@@ -237,6 +243,12 @@ def parse_track(item: TrackObject) -> Track:
+     )
+ 
+ 
++def _chunk_items(items: list[str], size: int) -> Iterator[list[str]]:
++    """Yield successive size-capped slices of items, preserving order."""
++    for start in range(0, len(items), size):
++        yield items[start : start + size]
++
++
+ async def get_playlist_tracks_paginated(
+     playlist_id: str,
+     limit: int | None = None,
+@@ -729,7 +741,8 @@ def add_tracks_to_playlist(playlist_id: str, track_uris: list[str]) -> ActionRes
+ 
+     Args:
+         playlist_id: Playlist ID
+-        track_uris: List of track URIs (up to 100)
++        track_uris: List of track URIs. Lists longer than 100 are added in
++            order across multiple requests (Spotify's per-request cap).
+     """
+     try:
+         # Convert track IDs to URIs if needed
+@@ -739,11 +752,15 @@ def add_tracks_to_playlist(playlist_id: str, track_uris: list[str]) -> ActionRes
+         ]
+ 
+         logger.info(f"🎧 Adding {len(uris)} tracks to playlist {playlist_id}")
+-        result = spotify_client.playlist_add_items(playlist_id, uris)
++        # Append each batch in turn; position=None keeps them in submission order.
++        snapshot_id = None
++        for batch in _chunk_items(uris, SPOTIFY_MAX_ITEMS_PER_REQUEST):
++            result = spotify_client.playlist_add_items(playlist_id, batch)
++            snapshot_id = result.get("snapshot_id") if result else snapshot_id
+         return ActionResult(
+             status="success",
+             message=f"Added {len(uris)} tracks to playlist",
+-            snapshot_id=result.get("snapshot_id") if result else None,
++            snapshot_id=snapshot_id,
+         )
+ 
+     except SpotifyException as e:
+@@ -930,13 +947,19 @@ async def remove_tracks_from_playlist(
+             )
+ 
+         logger.info(f"🚮 Removing {len(uris)} tracks from playlist {playlist_id}")
+-        result = spotify_client.playlist_remove_all_occurrences_of_items(
+-            playlist_id, uris
+-        )
++        # Remove-all is position-independent, so chunking is safe; thread each
++        # returned snapshot into the next batch so later chunks apply against
++        # the freshest playlist version.
++        snapshot_id = None
++        for batch in _chunk_items(uris, SPOTIFY_MAX_ITEMS_PER_REQUEST):
++            result = spotify_client.playlist_remove_all_occurrences_of_items(
++                playlist_id, batch, snapshot_id=snapshot_id
++            )
++            snapshot_id = result.get("snapshot_id") if result else snapshot_id
+         return ActionResult(
+             status="success",
+             message=f"Removed {len(uris)} tracks from playlist",
+-            snapshot_id=result.get("snapshot_id") if result else None,
++            snapshot_id=snapshot_id,
+         )
+ 
+     except SpotifyException as e:
+@@ -976,9 +999,19 @@ async def remove_specific_track_occurrences(
+ 
+     Note: positions are 0-based and refer to the CURRENT playlist snapshot. Read
+     the playlist (its tracks and snapshot_id) first, then pass that snapshot_id
+-    here. Any reorder or removal in between invalidates the positions.
++    here. Any reorder or removal in between invalidates the positions. At most
++    100 items per call — positions are snapshot-relative, so splitting across
++    requests would shift them, and this tool refuses rather than chunk.
+     """
+     try:
++        if len(items) > SPOTIFY_MAX_ITEMS_PER_REQUEST:
++            raise ValueError(
++                f"Maximum {SPOTIFY_MAX_ITEMS_PER_REQUEST} items per request "
++                "(Spotify API limit). Positional removals cannot be split across "
++                "requests without invalidating positions; call this tool in "
++                "separate steps, re-reading the snapshot_id between them."
++            )
++
+         payload = [
+             {
+                 "uri": item.uri
+diff --git a/tests/test_fastmcp_tools.py b/tests/test_fastmcp_tools.py
+index 25883d4..dd008d2 100644
+--- a/tests/test_fastmcp_tools.py
++++ b/tests/test_fastmcp_tools.py
+@@ -384,6 +384,24 @@ class TestAddTracksToPlaylist:
+         result = add_tracks_to_playlist("pl1", [])
+ 
+         assert "Added 0 tracks" in result.message
++        mock_spotify_api.playlist_add_items.assert_not_called()
++
++    def test_chunks_over_100_items_in_order(self, mock_spotify_api):
++        mock_spotify_api.playlist_add_items.side_effect = [
++            {"snapshot_id": "s1"},
++            {"snapshot_id": "s2"},
++        ]
++        uris = [f"spotify:track:t{i}" for i in range(150)]
++
++        result = add_tracks_to_playlist("pl1", uris)
++
++        assert "Added 150 tracks" in result.message
++        # Last chunk's snapshot is returned
++        assert result.snapshot_id == "s2"
++        assert mock_spotify_api.playlist_add_items.call_count == 2
++        first, second = mock_spotify_api.playlist_add_items.call_args_list
++        assert first.args == ("pl1", uris[:100])
++        assert second.args == ("pl1", uris[100:])
+ 
+     def test_spotify_error(self, mock_spotify_api):
+         mock_spotify_api.playlist_add_items.side_effect = SPOTIFY_ERROR
+@@ -403,9 +421,28 @@ class TestRemoveTracksFromPlaylist:
+         assert result.status == "success"
+         assert result.snapshot_id == "s2"
+         mock_spotify_api.playlist_remove_all_occurrences_of_items.assert_called_once_with(
+-            "pl1", ["spotify:track:rawid"]
++            "pl1", ["spotify:track:rawid"], snapshot_id=None
+         )
+ 
++    async def test_chunks_over_100_and_threads_snapshot(self, mock_spotify_api):
++        mock_spotify_api.playlist_remove_all_occurrences_of_items.side_effect = [
++            {"snapshot_id": "s1"},
++            {"snapshot_id": "s2"},
++        ]
++        uris = [f"spotify:track:t{i}" for i in range(150)]
++
++        result = await remove_tracks_from_playlist("pl1", uris)
++
++        assert "Removed 150 tracks" in result.message
++        assert result.snapshot_id == "s2"
++        calls = mock_spotify_api.playlist_remove_all_occurrences_of_items.call_args_list
++        assert len(calls) == 2
++        assert calls[0].args == ("pl1", uris[:100])
++        assert calls[0].kwargs == {"snapshot_id": None}
++        # Second chunk is applied against the snapshot the first returned
++        assert calls[1].args == ("pl1", uris[100:])
++        assert calls[1].kwargs == {"snapshot_id": "s1"}
++
+     async def test_spotify_error(self, mock_spotify_api):
+         mock_spotify_api.playlist_remove_all_occurrences_of_items.side_effect = (
+             SPOTIFY_ERROR
+@@ -543,6 +580,14 @@ class TestRemoveSpecificTrackOccurrences:
+         assert result.status == "success"
+         mock_context.elicit.assert_awaited_once()
+ 
++    async def test_rejects_more_than_100_items(self, mock_spotify_api):
++        items = [TrackOccurrences(uri=f"t{i}", positions=[i]) for i in range(101)]
++
++        with pytest.raises(ValueError, match="Maximum 100 items"):
++            await remove_specific_track_occurrences("pl1", items)
++
++        mock_spotify_api.playlist_remove_specific_occurrences_of_items.assert_not_called()
++
+     async def test_spotify_error(self, mock_spotify_api):
+         mock_spotify_api.playlist_remove_specific_occurrences_of_items.side_effect = (
+             SPOTIFY_ERROR
+-- 
+2.25.1
+

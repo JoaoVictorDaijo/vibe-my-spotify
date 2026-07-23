@@ -1,0 +1,169 @@
+From 61dd32e0ee16dff27a3d9d2bcafc589a2c01692c Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Luiz=20Tadeu=20Mendon=C3=A7a?= <tadeu.mendonca@outlook.com>
+Date: Tue, 21 Jul 2026 20:47:31 -0300
+Subject: [PATCH 1/5] fix: robust playlist track parsing + lighter total lookup
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Skip playlist entries with no resolvable track ID (local files and
+unavailable/removed tracks come back with "id": None), which previously
+raised an unhandled pydantic ValidationError and failed the whole tool call.
+
+Fetch the pagination total via playlist_items(limit=1, fields="total")
+instead of playlist(fields="tracks.total") - lighter request and the
+authoritative total for the cursor being paginated.
+
+Merges upstream jamiew/spotify-mcp PR #18. Closes #16, #17.
+
+🤖 Generated with [Claude Code](https://claude.ai/code)
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+---
+ src/spotify_mcp/fastmcp_server.py | 11 ++++---
+ tests/test_fastmcp_tools.py       | 48 +++++++++++++++++++++++++------
+ 2 files changed, 47 insertions(+), 12 deletions(-)
+
+diff --git a/src/spotify_mcp/fastmcp_server.py b/src/spotify_mcp/fastmcp_server.py
+index 3a099e0..14ead47 100644
+--- a/src/spotify_mcp/fastmcp_server.py
++++ b/src/spotify_mcp/fastmcp_server.py
+@@ -273,8 +273,9 @@ async def get_playlist_tracks_paginated(
+         # Parse and add tracks
+         batch_tracks = []
+         for item in tracks_result["items"]:
+-            if item and item.get("track"):
+-                batch_tracks.append(parse_track(item["track"]))
++            track_obj = (item or {}).get("track")
++            if track_obj and track_obj.get("id"):
++                batch_tracks.append(parse_track(track_obj))
+ 
+         tracks.extend(batch_tracks)
+         logger.info(
+@@ -837,8 +838,10 @@ async def get_playlist_tracks(
+         )
+ 
+         # Fetch total up front so progress notifications have a denominator
+-        playlist_info = spotify_client.playlist(playlist_id, fields="tracks.total")
+-        total_tracks = (playlist_info.get("tracks") or {}).get("total")
++        head = spotify_client.playlist_items(
++            playlist_id, limit=1, offset=0, fields="total"
++        )
++        total_tracks = (head or {}).get("total")
+ 
+         tracks = await get_playlist_tracks_paginated(
+             playlist_id, limit, offset, ctx=ctx, total=total_tracks
+diff --git a/tests/test_fastmcp_tools.py b/tests/test_fastmcp_tools.py
+index 7258041..891d399 100644
+--- a/tests/test_fastmcp_tools.py
++++ b/tests/test_fastmcp_tools.py
+@@ -590,7 +590,7 @@ class TestGetPlaylistTracks:
+             "total": 2,
+             "next": None,
+         }
+-        mock_spotify_api.playlist.return_value = {"tracks": {"total": 2}}
++        mock_spotify_api.playlist_items.return_value = {"total": 2}
+ 
+         result = await get_playlist_tracks("pl1", limit=50)
+ 
+@@ -605,12 +605,44 @@ class TestGetPlaylistTracks:
+             "total": 2,
+             "next": None,
+         }
+-        mock_spotify_api.playlist.return_value = {"tracks": {"total": 2}}
++        mock_spotify_api.playlist_items.return_value = {"total": 2}
+ 
+         result = await get_playlist_tracks("pl1", limit=50)
+ 
+         assert result.returned == 1
+ 
++    async def test_skips_tracks_without_id(self, mock_spotify_api, sample_track_data):
++        # Local files and unavailable/removed tracks come back with "id": None
++        local_file = {**sample_track_data, "id": None}
++        mock_spotify_api.playlist_tracks.return_value = {
++            "items": [{"track": sample_track_data}, {"track": local_file}],
++            "total": 2,
++            "next": None,
++        }
++        mock_spotify_api.playlist_items.return_value = {"total": 2}
++
++        result = await get_playlist_tracks("pl1", limit=50)
++
++        assert result.returned == 1
++        assert result.items[0].id == sample_track_data["id"]
++
++    async def test_total_uses_playlist_items_head_request(
++        self, mock_spotify_api, sample_track_data
++    ):
++        mock_spotify_api.playlist_tracks.return_value = {
++            "items": [{"track": sample_track_data}],
++            "next": None,
++        }
++        mock_spotify_api.playlist_items.return_value = {"total": 42}
++
++        result = await get_playlist_tracks("pl1", limit=50)
++
++        assert result.total == 42
++        mock_spotify_api.playlist_items.assert_called_once_with(
++            "pl1", limit=1, offset=0, fields="total"
++        )
++        mock_spotify_api.playlist.assert_not_called()
++
+     async def test_spotify_error(self, mock_spotify_api):
+         mock_spotify_api.playlist_tracks.side_effect = SPOTIFY_ERROR
+ 
+@@ -625,7 +657,7 @@ class TestGetPlaylistTracks:
+             "total": 1,
+             "next": None,
+         }
+-        mock_spotify_api.playlist.return_value = {"tracks": {"total": 1}}
++        mock_spotify_api.playlist_items.return_value = {"total": 1}
+ 
+         await get_playlist_tracks("pl1", limit=50, ctx=mock_context)
+ 
+@@ -646,7 +678,7 @@ class TestGetPlaylistTracks:
+             "next": None,
+         }
+         mock_spotify_api.playlist_tracks.side_effect = [batch1, batch2]
+-        mock_spotify_api.playlist.return_value = {"tracks": {"total": 150}}
++        mock_spotify_api.playlist_items.return_value = {"total": 150}
+ 
+         result = await get_playlist_tracks("pl1", limit=150)
+ 
+@@ -666,7 +698,7 @@ class TestGetPlaylistTracks:
+             "total": 500,
+             "next": "https://api.spotify.com/next",
+         }
+-        mock_spotify_api.playlist.return_value = {"tracks": {"total": 500}}
++        mock_spotify_api.playlist_items.return_value = {"total": 500}
+ 
+         result = await get_playlist_tracks("pl1", limit=100)
+ 
+@@ -675,7 +707,7 @@ class TestGetPlaylistTracks:
+ 
+     async def test_empty_playlist_returns_no_tracks(self, mock_spotify_api):
+         mock_spotify_api.playlist_tracks.return_value = {"items": []}
+-        mock_spotify_api.playlist.return_value = {"tracks": {"total": 0}}
++        mock_spotify_api.playlist_items.return_value = {"total": 0}
+ 
+         result = await get_playlist_tracks("pl1")
+ 
+@@ -685,12 +717,12 @@ class TestGetPlaylistTracks:
+     async def test_total_falls_back_to_returned_count(
+         self, mock_spotify_api, sample_track_data
+     ):
+-        # playlist() omits tracks.total -> total should fall back to len(tracks)
++        # playlist_items() omits total -> total should fall back to len(tracks)
+         mock_spotify_api.playlist_tracks.return_value = {
+             "items": [{"track": sample_track_data}],
+             "next": None,
+         }
+-        mock_spotify_api.playlist.return_value = {}
++        mock_spotify_api.playlist_items.return_value = {}
+ 
+         result = await get_playlist_tracks("pl1", limit=50)
+ 
+-- 
+2.25.1
+

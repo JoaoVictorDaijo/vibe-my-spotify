@@ -1,0 +1,320 @@
+From 4a6ecbfd203911276d9e16cd6c5d2b84539f746d Mon Sep 17 00:00:00 2001
+From: electro-wsl <joaovictordaijo@gmail.com>
+Date: Wed, 22 Jul 2026 23:06:28 -0300
+Subject: [PATCH 3/5] feat: positional keep-one track removal for dedup
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Add remove_specific_track_occurrences, exposing spotipy's
+playlist_remove_specific_occurrences_of_items so callers can delete
+individual copies of a track by 0-based position instead of every
+occurrence of a URI — the operation needed to deduplicate a playlist
+while keeping one copy.
+
+Route both removal tools through a shared _confirm_removal helper so the
+new positional path uses the exact same destructive-elicitation gate as
+remove_tracks_from_playlist.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+---
+ src/spotify_mcp/fastmcp_server.py | 133 +++++++++++++++++++++++++-----
+ tests/test_fastmcp_tools.py       |  88 +++++++++++++++++++-
+ 2 files changed, 198 insertions(+), 23 deletions(-)
+
+diff --git a/src/spotify_mcp/fastmcp_server.py b/src/spotify_mcp/fastmcp_server.py
+index 6164134..6e5d5d5 100644
+--- a/src/spotify_mcp/fastmcp_server.py
++++ b/src/spotify_mcp/fastmcp_server.py
+@@ -212,6 +212,13 @@ class RemovalConfirmation(BaseModel):
+     confirm: bool = False
+ 
+ 
++class TrackOccurrences(BaseModel):
++    """A track URI and the 0-based playlist positions of the copies to remove."""
++
++    uri: str
++    positions: list[int]
++
++
+ def parse_track(item: TrackObject) -> Track:
+     """Parse Spotify track data into Track model."""
+     album_data = item.get("album", {})
+@@ -864,6 +871,23 @@ async def get_playlist_tracks(
+         raise convert_spotify_error(e) from e
+ 
+ 
++async def _confirm_removal(ctx: Context | None, message: str) -> bool:
++    """Gate a destructive playlist edit behind an elicitation prompt.
++
++    Returns True to proceed. Confirmation is only requested when the client
++    advertises elicitation support; without it we proceed so these core ops
++    never hard-fail on capability-poor clients. When the client does support
++    elicitation and the prompt errors, the exception propagates rather than
++    silently deleting — an unconfirmed destructive edit must not slip through.
++    """
++    if ctx is None or not ctx.session.check_client_capability(
++        ClientCapabilities(elicitation=ElicitationCapability())
++    ):
++        return True
++    response = await ctx.elicit(message=message, schema=RemovalConfirmation)
++    return response.action == "accept" and bool(response.data and response.data.confirm)
++
++
+ @mcp.tool(
+     title="Remove Tracks from Playlist",
+     annotations=ToolAnnotations(
+@@ -880,6 +904,9 @@ async def remove_tracks_from_playlist(
+ ) -> ActionResult:
+     """Remove tracks from a playlist.
+ 
++    Removes every occurrence of each given URI. To delete only specific copies
++    (e.g. deduplicating while keeping one), use remove_specific_track_occurrences.
++
+     Args:
+         playlist_id: Playlist ID
+         track_uris: List of track URIs to remove
+@@ -891,29 +918,16 @@ async def remove_tracks_from_playlist(
+             for uri in track_uris
+         ]
+ 
+-        # Confirm this destructive op, but only when the client actually
+-        # advertises elicitation support. If it doesn't, proceed so this core
+-        # op never hard-fails on capability-poor clients. If it does support
+-        # elicitation and the prompt errors, we let that propagate rather than
+-        # silently deleting — an unconfirmed destructive edit must not slip through.
+-        if ctx is not None and ctx.session.check_client_capability(
+-            ClientCapabilities(elicitation=ElicitationCapability())
+-        ):
+-            response = await ctx.elicit(
+-                message=(
+-                    f"Remove {len(uris)} track(s) from playlist {playlist_id}? "
+-                    "This cannot be undone."
+-                ),
+-                schema=RemovalConfirmation,
+-            )
+-            confirmed = response.action == "accept" and bool(
+-                response.data and response.data.confirm
++        confirmed = await _confirm_removal(
++            ctx,
++            f"Remove {len(uris)} track(s) from playlist {playlist_id}? "
++            "This cannot be undone.",
++        )
++        if not confirmed:
++            return ActionResult(
++                status="cancelled",
++                message="Removal cancelled by user",
+             )
+-            if not confirmed:
+-                return ActionResult(
+-                    status="cancelled",
+-                    message="Removal cancelled by user",
+-                )
+ 
+         logger.info(f"🚮 Removing {len(uris)} tracks from playlist {playlist_id}")
+         result = spotify_client.playlist_remove_all_occurrences_of_items(
+@@ -929,6 +943,81 @@ async def remove_tracks_from_playlist(
+         raise convert_spotify_error(e) from e
+ 
+ 
++@mcp.tool(
++    title="Remove Specific Track Occurrences",
++    annotations=ToolAnnotations(
++        readOnlyHint=False,
++        destructiveHint=True,
++        idempotentHint=False,
++        openWorldHint=True,
++    ),
++    icons=[SPOTIFY_ICON],
++)
++@log_tool_execution
++async def remove_specific_track_occurrences(
++    playlist_id: str,
++    items: list[TrackOccurrences],
++    snapshot_id: str | None = None,
++    ctx: Context | None = None,
++) -> ActionResult:
++    """Remove specific copies of tracks from a playlist by position.
++
++    Deletes only the copies at the given positions, leaving other occurrences
++    of the same URI in place. This is the tool for deduplicating a playlist
++    while keeping one copy; remove_tracks_from_playlist removes every occurrence.
++
++    Args:
++        playlist_id: Playlist ID
++        items: Tracks to remove, each with a `uri` and the `positions` of the
++            copies to delete.
++        snapshot_id: Playlist snapshot the positions were read against. Pass it:
++            Spotify uses it to reject the edit if the playlist changed, so stale
++            positions can't delete the wrong tracks.
++
++    Note: positions are 0-based and refer to the CURRENT playlist snapshot. Read
++    the playlist (its tracks and snapshot_id) first, then pass that snapshot_id
++    here. Any reorder or removal in between invalidates the positions.
++    """
++    try:
++        payload = [
++            {
++                "uri": item.uri
++                if item.uri.startswith("spotify:track:")
++                else f"spotify:track:{item.uri}",
++                "positions": item.positions,
++            }
++            for item in items
++        ]
++        total_positions = sum(len(item.positions) for item in items)
++
++        confirmed = await _confirm_removal(
++            ctx,
++            f"Remove {total_positions} specific track copy/copies from "
++            f"playlist {playlist_id}? This cannot be undone.",
++        )
++        if not confirmed:
++            return ActionResult(
++                status="cancelled",
++                message="Removal cancelled by user",
++            )
++
++        logger.info(
++            f"🚮 Removing {total_positions} specific occurrence(s) across "
++            f"{len(payload)} track(s) from playlist {playlist_id}"
++        )
++        result = spotify_client.playlist_remove_specific_occurrences_of_items(
++            playlist_id, payload, snapshot_id=snapshot_id
++        )
++        return ActionResult(
++            status="success",
++            message=f"Removed {total_positions} specific track occurrence(s)",
++            snapshot_id=result.get("snapshot_id") if result else None,
++        )
++
++    except SpotifyException as e:
++        raise convert_spotify_error(e) from e
++
++
+ @mcp.tool(
+     title="Edit Playlist Details",
+     annotations=ToolAnnotations(
+diff --git a/tests/test_fastmcp_tools.py b/tests/test_fastmcp_tools.py
+index b05bf6d..25883d4 100644
+--- a/tests/test_fastmcp_tools.py
++++ b/tests/test_fastmcp_tools.py
+@@ -14,6 +14,7 @@ from spotify_mcp.fastmcp_server import (
+     PlaybackState,
+     Playlist,
+     Track,
++    TrackOccurrences,
+     add_to_queue,
+     add_tracks_to_playlist,
+     album_resource,
+@@ -35,6 +36,7 @@ from spotify_mcp.fastmcp_server import (
+     modify_playlist_details,
+     playback_control,
+     playlist_resource,
++    remove_specific_track_occurrences,
+     remove_tracks_from_playlist,
+     reorder_playlist_tracks,
+     search_tracks,
+@@ -345,7 +347,9 @@ class TestGetAlbumInfo:
+ 
+ class TestCreatePlaylist:
+     def test_success(self, mock_spotify_api, sample_playlist_data):
+-        mock_spotify_api.current_user_playlist_create.return_value = sample_playlist_data
++        mock_spotify_api.current_user_playlist_create.return_value = (
++            sample_playlist_data
++        )
+ 
+         result = create_playlist("My Playlist", description="desc", public=False)
+ 
+@@ -468,6 +472,88 @@ class TestRemoveTracksFromPlaylist:
+         mock_spotify_api.playlist_remove_all_occurrences_of_items.assert_not_called()
+ 
+ 
++class TestRemoveSpecificTrackOccurrences:
++    async def test_builds_positional_payload_and_threads_snapshot(
++        self, mock_spotify_api
++    ):
++        mock_spotify_api.playlist_remove_specific_occurrences_of_items.return_value = {
++            "snapshot_id": "s9"
++        }
++
++        result = await remove_specific_track_occurrences(
++            "pl1",
++            [
++                TrackOccurrences(uri="rawid", positions=[2, 5]),
++                TrackOccurrences(uri="spotify:track:abc", positions=[7]),
++            ],
++            snapshot_id="snap0",
++        )
++
++        assert result.status == "success"
++        assert result.snapshot_id == "s9"
++        mock_spotify_api.playlist_remove_specific_occurrences_of_items.assert_called_once_with(
++            "pl1",
++            [
++                {"uri": "spotify:track:rawid", "positions": [2, 5]},
++                {"uri": "spotify:track:abc", "positions": [7]},
++            ],
++            snapshot_id="snap0",
++        )
++
++    async def test_snapshot_defaults_to_none(self, mock_spotify_api):
++        mock_spotify_api.playlist_remove_specific_occurrences_of_items.return_value = {
++            "snapshot_id": "s9"
++        }
++
++        await remove_specific_track_occurrences(
++            "pl1", [TrackOccurrences(uri="rawid", positions=[0])]
++        )
++
++        _, kwargs = (
++            mock_spotify_api.playlist_remove_specific_occurrences_of_items.call_args
++        )
++        assert kwargs == {"snapshot_id": None}
++
++    async def test_elicit_decline_cancels(self, mock_spotify_api, mock_context):
++        mock_context.elicit.return_value = SimpleNamespace(action="decline", data=None)
++
++        result = await remove_specific_track_occurrences(
++            "pl1",
++            [TrackOccurrences(uri="rawid", positions=[2])],
++            ctx=mock_context,
++        )
++
++        assert result.status == "cancelled"
++        mock_spotify_api.playlist_remove_specific_occurrences_of_items.assert_not_called()
++
++    async def test_elicit_accept_proceeds(self, mock_spotify_api, mock_context):
++        mock_spotify_api.playlist_remove_specific_occurrences_of_items.return_value = {
++            "snapshot_id": "s9"
++        }
++        mock_context.elicit.return_value = SimpleNamespace(
++            action="accept", data=SimpleNamespace(confirm=True)
++        )
++
++        result = await remove_specific_track_occurrences(
++            "pl1",
++            [TrackOccurrences(uri="rawid", positions=[2])],
++            ctx=mock_context,
++        )
++
++        assert result.status == "success"
++        mock_context.elicit.assert_awaited_once()
++
++    async def test_spotify_error(self, mock_spotify_api):
++        mock_spotify_api.playlist_remove_specific_occurrences_of_items.side_effect = (
++            SPOTIFY_ERROR
++        )
++
++        with pytest.raises(ValueError):
++            await remove_specific_track_occurrences(
++                "pl1", [TrackOccurrences(uri="rawid", positions=[0])]
++            )
++
++
+ class TestModifyPlaylistDetails:
+     def test_success(self, mock_spotify_api):
+         result = modify_playlist_details("pl1", name="New Name", public=False)
+-- 
+2.25.1
+

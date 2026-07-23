@@ -1,0 +1,77 @@
+From 1f090cf632c0b49d585ea9fdd16b26254b3985ee Mon Sep 17 00:00:00 2001
+From: electro-wsl <joaovictordaijo@gmail.com>
+Date: Wed, 22 Jul 2026 23:01:56 -0300
+Subject: [PATCH 2/5] fix: create_playlist uses current_user_playlist_create
+
+user_playlist_create() targets POST /users/{id}/playlists, which Spotify
+removed in Feb 2026. Switch to current_user_playlist_create(), which posts
+to /me/playlists and needs no separate current_user() lookup.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+---
+ src/spotify_mcp/fastmcp_server.py |  5 ++---
+ tests/conftest.py                 |  2 +-
+ tests/test_fastmcp_tools.py       | 11 +++++------
+ 3 files changed, 8 insertions(+), 10 deletions(-)
+
+diff --git a/src/spotify_mcp/fastmcp_server.py b/src/spotify_mcp/fastmcp_server.py
+index 14ead47..6164134 100644
+--- a/src/spotify_mcp/fastmcp_server.py
++++ b/src/spotify_mcp/fastmcp_server.py
+@@ -686,9 +686,8 @@ def create_playlist(name: str, description: str = "", public: bool = True) -> Pl
+     """
+     try:
+         logger.info(f"🎧 Creating playlist: '{name}' (public={public})")
+-        user = spotify_client.current_user()
+-        result = spotify_client.user_playlist_create(
+-            user["id"], name, public=public, description=description
++        result = spotify_client.current_user_playlist_create(
++            name, public=public, description=description
+         )
+ 
+         playlist = Playlist(
+diff --git a/tests/conftest.py b/tests/conftest.py
+index 7618f70..1a3d0b7 100644
+--- a/tests/conftest.py
++++ b/tests/conftest.py
+@@ -113,7 +113,7 @@ def mock_spotify_client():
+     mock_client.playlist.return_value = SAMPLE_PLAYLIST
+     mock_client.track.return_value = SAMPLE_TRACK
+     mock_client.playlist_add_items.return_value = {"snapshot_id": "test123"}
+-    mock_client.user_playlist_create.return_value = SAMPLE_PLAYLIST
++    mock_client.current_user_playlist_create.return_value = SAMPLE_PLAYLIST
+ 
+     return mock_client
+ 
+diff --git a/tests/test_fastmcp_tools.py b/tests/test_fastmcp_tools.py
+index 891d399..b05bf6d 100644
+--- a/tests/test_fastmcp_tools.py
++++ b/tests/test_fastmcp_tools.py
+@@ -345,19 +345,18 @@ class TestGetAlbumInfo:
+ 
+ class TestCreatePlaylist:
+     def test_success(self, mock_spotify_api, sample_playlist_data):
+-        mock_spotify_api.current_user.return_value = {"id": "testuser"}
+-        mock_spotify_api.user_playlist_create.return_value = sample_playlist_data
++        mock_spotify_api.current_user_playlist_create.return_value = sample_playlist_data
+ 
+         result = create_playlist("My Playlist", description="desc", public=False)
+ 
+         assert result.name == "RapCaviar"
+-        mock_spotify_api.user_playlist_create.assert_called_once_with(
+-            "testuser", "My Playlist", public=False, description="desc"
++        mock_spotify_api.current_user_playlist_create.assert_called_once_with(
++            "My Playlist", public=False, description="desc"
+         )
++        mock_spotify_api.current_user.assert_not_called()
+ 
+     def test_spotify_error(self, mock_spotify_api):
+-        mock_spotify_api.current_user.return_value = {"id": "testuser"}
+-        mock_spotify_api.user_playlist_create.side_effect = SPOTIFY_ERROR
++        mock_spotify_api.current_user_playlist_create.side_effect = SPOTIFY_ERROR
+ 
+         with pytest.raises(ValueError):
+             create_playlist("My Playlist")
+-- 
+2.25.1
+

@@ -1,0 +1,11 @@
+# Secrets — never commit
+.env
+.env.*
+
+# Spotify OAuth token cache (written by auth.sh / the server)
+spotify-mcp/.cache
+
+# Python
+.venv/
+__pycache__/
+*.pyc

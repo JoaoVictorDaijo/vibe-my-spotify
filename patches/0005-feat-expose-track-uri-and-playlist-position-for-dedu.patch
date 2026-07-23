@@ -1,0 +1,165 @@
+From 0fb7f05735640df7107bc01543c8c2f28142accf Mon Sep 17 00:00:00 2001
+From: electro-wsl <joaovictordaijo@gmail.com>
+Date: Wed, 22 Jul 2026 23:14:33 -0300
+Subject: [PATCH 5/5] feat: expose track uri and playlist position for dedup
+
+The Track model gained a uri (populated by parse_track from the item) and a
+position field. During playlist pagination each track's position is set to its
+absolute 0-based index in the playlist, computed from the raw item index so it
+stays correct even when local/unavailable entries are skipped.
+
+Together these let a caller pinpoint which copy of a duplicated track to delete
+and feed exactly that uri+position into remove_specific_track_occurrences.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+---
+ src/spotify_mcp/fastmcp_server.py | 14 ++++++--
+ src/spotify_mcp/spotify_types.py  |  1 +
+ tests/conftest.py                 |  1 +
+ tests/test_fastmcp_tools.py       | 57 +++++++++++++++++++++++++++++++
+ 4 files changed, 70 insertions(+), 3 deletions(-)
+
+diff --git a/src/spotify_mcp/fastmcp_server.py b/src/spotify_mcp/fastmcp_server.py
+index e025608..841601c 100644
+--- a/src/spotify_mcp/fastmcp_server.py
++++ b/src/spotify_mcp/fastmcp_server.py
+@@ -80,6 +80,9 @@ class Track(BaseModel):
+     popularity: int | None = None
+     external_urls: dict[str, str] | None = None
+     added_at: str | None = None
++    uri: str | None = None
++    # Absolute 0-based index within a playlist; only set for playlist reads.
++    position: int | None = None
+ 
+ 
+ class PlaybackState(BaseModel):
+@@ -240,6 +243,7 @@ def parse_track(item: TrackObject) -> Track:
+         duration_ms=item.get("duration_ms"),
+         popularity=item.get("popularity"),
+         external_urls=cast("dict[str, str]", item.get("external_urls")),
++        uri=item.get("uri"),
+     )
+ 
+ 
+@@ -289,12 +293,16 @@ async def get_playlist_tracks_paginated(
+         if not tracks_result or not tracks_result.get("items"):
+             break
+ 
+-        # Parse and add tracks
++        # Parse and add tracks. Enumerate over the raw items so position stays
++        # the absolute playlist index even when local/unavailable entries are
++        # skipped — that index is what remove_specific_track_occurrences needs.
+         batch_tracks = []
+-        for item in tracks_result["items"]:
++        for index, item in enumerate(tracks_result["items"]):
+             track_obj = (item or {}).get("track")
+             if track_obj and track_obj.get("id"):
+-                batch_tracks.append(parse_track(track_obj))
++                track = parse_track(track_obj)
++                track.position = current_offset + index
++                batch_tracks.append(track)
+ 
+         tracks.extend(batch_tracks)
+         logger.info(
+diff --git a/src/spotify_mcp/spotify_types.py b/src/spotify_mcp/spotify_types.py
+index 5c46a4e..75532a5 100644
+--- a/src/spotify_mcp/spotify_types.py
++++ b/src/spotify_mcp/spotify_types.py
+@@ -46,6 +46,7 @@ class _TrackRequired(TypedDict):
+ 
+ 
+ class TrackObject(_TrackRequired, total=False):
++    uri: str
+     artists: list[ArtistRef]
+     album: AlbumRef
+     release_date: str
+diff --git a/tests/conftest.py b/tests/conftest.py
+index 1a3d0b7..09f88a4 100644
+--- a/tests/conftest.py
++++ b/tests/conftest.py
+@@ -9,6 +9,7 @@ import pytest
+ # Sample Spotify API response data for testing
+ SAMPLE_TRACK = {
+     "id": "4iV5W9uYEdYUVa79Axb7Rh",
++    "uri": "spotify:track:4iV5W9uYEdYUVa79Axb7Rh",
+     "name": "Never Gonna Give You Up",
+     "artists": [{"name": "Rick Astley", "id": "0gxyHStUsqpMadRV0Di1Qt"}],
+     "album": {"name": "Whenever You Need Somebody", "id": "6XzKGcM6laRkTrME3rQvJw"},
+diff --git a/tests/test_fastmcp_tools.py b/tests/test_fastmcp_tools.py
+index dd008d2..413615f 100644
+--- a/tests/test_fastmcp_tools.py
++++ b/tests/test_fastmcp_tools.py
+@@ -262,6 +262,9 @@ class TestGetTrackInfo:
+ 
+         assert len(result.tracks) == 1
+         assert result.tracks[0].artist == "Rick Astley"
++        assert result.tracks[0].uri == "spotify:track:4iV5W9uYEdYUVa79Axb7Rh"
++        # position is playlist-context only; unset outside a playlist read
++        assert result.tracks[0].position is None
+         mock_spotify_api.track.assert_called_once_with("4iV5W9uYEdYUVa79Axb7Rh")
+ 
+     def test_batch_tracks(self, mock_spotify_api, sample_track_data):
+@@ -858,6 +861,60 @@ class TestGetPlaylistTracks:
+ 
+         assert result.total == 1
+ 
++    async def test_assigns_uri_and_absolute_position(
++        self, mock_spotify_api, sample_track_data
++    ):
++        mock_spotify_api.playlist_tracks.return_value = {
++            "items": [{"track": sample_track_data}, {"track": sample_track_data}],
++            "next": None,
++        }
++        mock_spotify_api.playlist_items.return_value = {"total": 2}
++
++        result = await get_playlist_tracks("pl1", limit=50, offset=10)
++
++        assert result.items[0].uri == sample_track_data["uri"]
++        # positions are absolute in the playlist, so they start at the offset
++        assert [t.position for t in result.items] == [10, 11]
++
++    async def test_position_reflects_skipped_local_files(
++        self, mock_spotify_api, sample_track_data
++    ):
++        # A local file (id=None) sits between two real tracks and is skipped,
++        # but must not shift the surviving tracks' absolute positions.
++        local_file = {**sample_track_data, "id": None}
++        mock_spotify_api.playlist_tracks.return_value = {
++            "items": [
++                {"track": sample_track_data},
++                {"track": local_file},
++                {"track": sample_track_data},
++            ],
++            "next": None,
++        }
++        mock_spotify_api.playlist_items.return_value = {"total": 3}
++
++        result = await get_playlist_tracks("pl1", limit=50)
++
++        assert result.returned == 2
++        assert [t.position for t in result.items] == [0, 2]
++
++    async def test_position_continues_across_batches(
++        self, mock_spotify_api, sample_track_data
++    ):
++        batch1 = {
++            "items": [{"track": sample_track_data}] * 100,
++            "next": "https://api.spotify.com/next",
++        }
++        batch2 = {
++            "items": [{"track": sample_track_data}] * 50,
++            "next": None,
++        }
++        mock_spotify_api.playlist_tracks.side_effect = [batch1, batch2]
++        mock_spotify_api.playlist_items.return_value = {"total": 150}
++
++        result = await get_playlist_tracks("pl1", limit=150)
++
++        assert [t.position for t in result.items] == list(range(150))
++
+ 
+ class TestGetSavedTracks:
+     def test_success_includes_added_at(self, mock_spotify_api, sample_track_data):
+-- 
+2.25.1
+

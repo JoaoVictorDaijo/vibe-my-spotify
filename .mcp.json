@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "spotify": {
+      "command": "/home/mainframe/Vibe My Spotify/run-server.sh",
+      "args": []
+    }
+  }
+}
