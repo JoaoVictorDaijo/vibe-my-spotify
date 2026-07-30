@@ -120,11 +120,20 @@ applied vs parked) lives in the gitignored `curation-review/`.
 
 Durable state baseline: `curation-review/baseline/` holds the latest full
 export of every playlist (JSON + compact txt, plus liked-songs.json). Refresh
-it after every apply and diff future API pulls against it (the exporter's
-snapshot-skip works directly against this directory via `--out`). Scratchpad
-exports are working copies; the baseline is the source of truth between
-sessions. Roster counts above are as-verified at apply time — live state
-drifts with the owner's own listening; the baseline records reality.
+it after every apply and diff future API pulls against it
+(`scripts/diff_baseline.py NEW_DIR` — reports adds/removals/moves per
+playlist). Scratchpad exports are working copies; the baseline is the source
+of truth between sessions. Roster counts above are as-verified at apply time
+— live state drifts with the owner's own listening; the baseline records
+reality.
+
+The learning loop: `curation-review/vibes/` holds per-playlist vibe profiles
+(theme, canon anchors, borders, owner rulings, expulsions) distilled from
+real operations — judgment jobs read them BEFORE judging, and owner
+hand-edits surfaced by the baseline diff are taste signals folded back in
+each cycle. `curation-review/verdicts/` archives raw judge outputs with
+reasons. The goal: each cycle makes the agent a better advisor on what is
+canonical per playlist.
 
 Liked Songs caveat: old Spotify auto-liked every track of a liked album, so
 the ~6.5k Liked pool contains album-spam — a liked track is NOT reliable
