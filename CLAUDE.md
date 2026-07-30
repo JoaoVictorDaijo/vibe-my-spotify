@@ -53,12 +53,18 @@ fetches already return `external_ids.isrc` for dedup evidence. Alternatives
 landscape (Tidal = designated escape hatch):
 [docs/streaming-api-alternatives.md](docs/streaming-api-alternatives.md).
 
-## Model tiering (owner-approved)
+## Model tiering (owner-approved; revised by the July 2026 operation)
 
 - Scripts for all mechanics — never a model.
-- Sonnet is the workhorse for routine judgment (reservoir drain, thematic rebalance).
-- Opus re-judges every Sonnet verdict below high confidence (medium AND low).
-- Clustering and new-playlist proposals go straight to Opus.
+- Sonnet for small, well-bounded judgment only. Large single-pass
+  classification (hundreds of tracks) goes to Opus directly — the real run
+  showed Sonnet degrading at drain scale (33% overturn, off-by-one reason
+  shifts; see [docs/operation-learnings.md](docs/operation-learnings.md)).
+- When Sonnet is used: Opus re-judges every verdict below high confidence.
+- Clustering, new-playlist proposals, and synthesis go to Opus; a Fable agent
+  checks/merges multi-agent findings on owner approval.
+- Agents producing large verdict files must write incrementally (64k output
+  ceiling) and return only counts as text.
 
 ## Playlist architecture policy (owner-approved)
 
