@@ -108,6 +108,12 @@ Every account write needs an explicitly owner-approved plan. Re-export before
 mutating — playlist state drifts. Live session state (exports, review files,
 applied vs parked) lives in the gitignored `curation-review/`.
 
+Liked Songs caveat: old Spotify auto-liked every track of a liked album, so
+the ~6.5k Liked pool contains album-spam — a liked track is NOT reliable
+evidence of curated affection. Any Liked-driven pass (backfill, suggestions)
+must weigh this; cleanup idea parked in backlog issue #2 (needs added_at in
+the export to detect same-album timestamp runs).
+
 ## Data hygiene — the repo is public
 
 Never commit `.env`, token caches, playlist exports, or anything under
