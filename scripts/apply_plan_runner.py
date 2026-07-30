@@ -4,18 +4,26 @@
         [--journal PATH] [--resume] [--dry-run] [--phase N] [--yes]
 
 Talks to raw spotipy (via the vendored server's auth client), never the MCP tools:
-the MCP write tools re-chunk internally, gate removals behind an elicitation
-prompt, and keep no journal — none of which is acceptable for 57 irreversible
-writes.
+those re-chunk internally, gate removals behind an elicitation prompt, and keep no
+journal — none of which is acceptable for 57 irreversible writes.
 
-Safety model (see the plan's own apply_plan.md):
-  * adds (phase 2) strictly precede removals (phase 3), so an interruption can
-    only ever leave duplicates, never a lost track;
-  * phase 2.5 re-reads every add target's total and HARD-GATES phase 3;
-  * every call gets an `attempt` journal record before it and a `done` record
-    only after a verified-successful response, so a failed call can never be
-    mistaken for a completed one on resume;
+Safety model (see the plan's apply_plan.md):
+  * adds (phase 2) strictly precede removals (phase 3), so an interruption can only
+    leave duplicates, never a lost track;
+  * any drift from the exported baseline halts the run — the plan resolves positions to
+    URIs against one specific export, so a drifted playlist makes it stale, and
+    regenerating it is free where patching it in flight is guesswork;
+  * phase 2.5 re-reads every add target's total and hard-gates phase 3, and its pass is
+    bound to the run that earned it;
+  * every phase enforces its own entry gate, so running one phase in isolation is as
+    safe as running the whole sequence;
+  * every call gets an `attempt` journal record before it and a `done` record only
+    after a verified-successful response, so a failed call can never be mistaken for a
+    completed one on resume;
   * any 429 halts the whole run (docs/spotify-rate-limits.md rule 5).
+
+Exit codes: 0 clean · 1 phase-4 mismatch · 2 quota exhausted · 3 halted precondition ·
+4 drift detected (re-export and regenerate).
 """
 
 from __future__ import annotations
@@ -25,11 +33,13 @@ import json
 import os
 import sys
 import time
+import uuid
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-# spotipy and the vendored auth client are imported lazily (see _load_spotify) so
-# that --dry-run works anywhere, with no credentials and no venv.
+# spotipy and the vendored auth client are imported lazily (see _load_spotify) so that
+# --dry-run works anywhere, with no credentials and no venv.
 requests = None  # type: ignore[assignment]
 SpotifyException = None  # type: ignore[assignment]
 
@@ -46,14 +56,22 @@ def _load_spotify():
     return spotify_api
 
 
-# Post-Feb-2026 dev-mode apps 429 at sustained rates near 1 req/s, and this app
-# has never issued a playlist WRITE — cold-start ceilings are the low ones
-# (docs/spotify-rate-limits.md). 2.0s is the plan's chosen pace.
+# Post-Feb-2026 dev-mode apps 429 at sustained rates near 1 req/s, and this app has
+# never issued a playlist WRITE — cold-start ceilings are the low ones
+# (docs/spotify-rate-limits.md).
 PACE_SECONDS = 2.0
 QUOTA_STOP_SECONDS = 300
 PHASE4_COOLDOWN_SECONDS = 60
-OK_TRANSIENT = (500, 502, 503, 504)
+TRANSIENT_STATUS = (500, 502, 503, 504)
 PAGE = 100
+
+GATE_PHASE25 = "phase25_pass"
+
+EXIT_OK = 0
+EXIT_MISMATCH = 1
+EXIT_QUOTA = 2
+EXIT_HALT = 3
+EXIT_DRIFT = 4
 
 
 class QuotaExhausted(RuntimeError):
@@ -64,6 +82,14 @@ class PlanHalt(RuntimeError):
     """A precondition or gate failed; stop before touching anything else."""
 
 
+class PlanDrift(RuntimeError):
+    """Live playlist state no longer matches the export the plan was generated from."""
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 # --------------------------------------------------------------------------- #
 # journal
 # --------------------------------------------------------------------------- #
@@ -72,20 +98,23 @@ class Journal:
     """Append-only JSONL with two records per op (attempt, then done).
 
     An op counts as done ONLY IF it has a done record with ok=True and success
-    evidence (a snapshot_id for writes, a playlist id for creates). Anything
-    else — 5xx, missing evidence, attempt without done — is UNKNOWN and must be
-    resolved by re-reading the playlist, never by a blind replay.
+    evidence (a snapshot_id for writes, a playlist id for creates). Anything else —
+    5xx, missing evidence, attempt without done — is UNKNOWN and must be resolved by
+    re-reading the playlist, never by a blind replay.
+
+    The journal is also the only durable home for cross-invocation state: adopted
+    playlist ids and gate passes are read back at startup, so invoking a single phase
+    later inherits what earlier phases established.
     """
+
+    WRITE_ACTIONS = ("add_tracks", "remove_tracks")
 
     def __init__(self, path: Path, config_id: str):
         self.path = path
         self.config_id = config_id
         self.records: list[dict] = []
         if path.exists():
-            for line in path.read_text().splitlines():
-                line = line.strip()
-                if line:
-                    self.records.append(json.loads(line))
+            self._load()
             header = next((r for r in self.records if r.get("state") == "header"), None)
             if header and header.get("config_id") != config_id:
                 raise PlanHalt(
@@ -95,7 +124,25 @@ class Journal:
         else:
             self._write({"state": "header", "config_id": config_id,
                          "started": _now(), "pace_seconds": PACE_SECONDS})
-        self.calls = max([r.get("run_call_count", 0) for r in self.records] or [0])
+        self.ops_recorded = max([r.get("run_op_count", 0) for r in self.records] or [0])
+
+    def _load(self) -> None:
+        """Read the journal, tolerating a torn final record.
+
+        A kill between write() and fsync() can leave a half-written last line; that
+        line describes work whose outcome is unknown either way, and the UNKNOWN path
+        already re-verifies by playlist diff. An unparseable line anywhere else is a
+        real corruption and must not be silently accepted.
+        """
+        lines = [ln for ln in self.path.read_text().splitlines() if ln.strip()]
+        for i, line in enumerate(lines):
+            try:
+                self.records.append(json.loads(line))
+            except json.JSONDecodeError:
+                if i == len(lines) - 1:
+                    print(f"  journal: discarding a torn final record (line {i + 1})")
+                    break
+                raise PlanHalt(f"journal is corrupt at line {i + 1}; refusing to resume")
 
     def _write(self, rec: dict) -> None:
         rec.setdefault("ts", _now())
@@ -105,22 +152,29 @@ class Journal:
             os.fsync(fh.fileno())
         self.records.append(rec)
 
-    def attempt(self, seq: int, op: dict) -> None:
-        self.calls += 1
+    def attempt(self, seq: int, op: dict, playlist_id: str, uris: list[str] | None = None) -> None:
+        self.ops_recorded += 1
         self._write({
             "seq": seq, "state": "attempt", "phase": op["phase"], "action": op["action"],
-            "playlist_name": op.get("playlist_name"), "playlist_id": op["playlist_id_or_name"],
+            "playlist_name": op.get("playlist_name"), "playlist_id": playlist_id,
             "chunk_index": op.get("chunk_index"), "chunks_total": op.get("chunks_total"),
-            "uris": op.get("uris"), "pair_ids": op.get("pair_ids"),
-            "run_call_count": self.calls,
+            "uris": op.get("uris") if uris is None else uris,
+            "pair_ids": op.get("pair_ids"), "run_op_count": self.ops_recorded,
         })
 
     def done(self, seq: int, *, ok: bool, http_status: int | None = None,
              snapshot_id: str | None = None, playlist_id: str | None = None,
-             detail: str | None = None) -> None:
+             placeholder: bool = False, detail: str | None = None) -> None:
+        """Record an outcome.
+
+        `placeholder` marks evidence that is not a real snapshot_id — a read, or an add
+        verified by diff rather than by a write — so snapshot bookkeeping can ignore it
+        without having to recognise the string.
+        """
         self._write({"seq": seq, "state": "done", "ok": ok, "http_status": http_status,
                      "snapshot_id": snapshot_id, "playlist_id": playlist_id,
-                     "detail": detail, "run_call_count": self.calls})
+                     "placeholder": placeholder, "detail": detail,
+                     "run_op_count": self.ops_recorded})
 
     def note(self, kind: str, **kw) -> None:
         self._write({"state": "note", "kind": kind, **kw})
@@ -131,60 +185,62 @@ class Journal:
     def _has_evidence(rec: dict) -> bool:
         return bool(rec.get("snapshot_id") or rec.get("playlist_id"))
 
+    def _attempt_rec(self, seq: int) -> dict | None:
+        return next((r for r in reversed(self.records)
+                     if r.get("seq") == seq and r.get("state") == "attempt"), None)
+
+    def _successes(self):
+        """Yield (attempt_record, done_record) for every verified-successful op.
+
+        A retried op writes a second attempt/done pair, so each done is matched to the
+        attempt immediately preceding it — that attempt holds the URIs actually sent.
+        """
+        latest: dict[int, dict] = {}
+        for rec in self.records:
+            if rec.get("state") == "attempt":
+                latest[rec.get("seq")] = rec
+            elif rec.get("state") == "done" and rec.get("ok") and self._has_evidence(rec):
+                att = latest.get(rec.get("seq"))
+                if att:
+                    yield att, rec
+
+    def _notes(self, kind: str):
+        return [r for r in self.records if r.get("state") == "note" and r.get("kind") == kind]
+
     def status(self, seq: int) -> str:
         """'done' | 'unknown' | 'todo'.
 
         'done' demands ok=True AND success evidence, so a 5xx or an evidence-less
         response is UNKNOWN rather than complete — the one rule standing between a
-        failed add and a phase-3 delete of its source copy.
+        failed add and a phase-3 delete of its source copy. The LAST done record wins:
+        an op that failed and was later re-executed successfully is done.
         """
-        for rec in self.records:
+        for rec in reversed(self.records):
             if rec.get("seq") == seq and rec.get("state") == "done":
                 return "done" if (rec.get("ok") and self._has_evidence(rec)) else "unknown"
-        return "unknown" if self._attempt(seq) else "todo"
-
-    def _attempt(self, seq: int) -> dict | None:
-        return next((r for r in self.records
-                     if r.get("seq") == seq and r.get("state") == "attempt"), None)
-
-    def _successes(self):
-        """Yield (attempt_record, done_record) for every verified-successful op."""
-        for rec in self.records:
-            if rec.get("state") != "done" or not rec.get("ok") or not self._has_evidence(rec):
-                continue
-            att = self._attempt(rec.get("seq"))
-            if att:
-                yield att, rec
+        return "unknown" if self._attempt_rec(seq) else "todo"
 
     def created_playlists(self) -> dict[str, str]:
         """{playlist name: id} for playlists this run created or adopted.
 
-        A create's attempt record carries the NAME in playlist_id (the plan has no
-        id yet); its done record carries the real id.
+        A create's attempt record carries the NAME in playlist_id (no id exists yet);
+        its done record carries the real id.
         """
         out: dict[str, str] = {}
         for att, done in self._successes():
             if att.get("action") == "create_playlist" and done.get("playlist_id"):
                 out[att["playlist_id"]] = done["playlist_id"]
-        for rec in self.records:
-            if rec.get("state") == "note" and rec.get("kind") == "adopted_playlist":
-                out[rec["name"]] = rec["playlist_id"]
+        for rec in self._notes("adopted_playlist"):
+            out[rec["name"]] = rec["playlist_id"]
         return out
 
-    WRITE_ACTIONS = ("add_tracks", "remove_tracks", "remove_specific")
-
     def last_snapshot(self, playlist_id: str) -> str | None:
-        """The snapshot_id our own last successful WRITE to this playlist returned.
-
-        Read ops journal placeholder evidence, so only write actions count here —
-        otherwise a verification read would be mistaken for a mutation.
-        """
+        """The snapshot_id our own last successful WRITE to this playlist returned."""
         snap = None
         for att, done in self._successes():
             if (att.get("playlist_id") == playlist_id
                     and att.get("action") in self.WRITE_ACTIONS
-                    and done.get("snapshot_id")
-                    and not done["snapshot_id"].startswith(("n/a", "verified"))):
+                    and done.get("snapshot_id") and not done.get("placeholder")):
                 snap = done["snapshot_id"]
         return snap
 
@@ -196,90 +252,169 @@ class Journal:
                 out |= set(att.get("uris") or [])
         return out
 
+    def pending_write_uris(self, playlist_id: str, action: str) -> set[str]:
+        """URIs of in-flight writes to a playlist — attempted, outcome UNKNOWN.
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+        Such a write may or may not have landed, so it widens what counts as an
+        expected live state until the per-op diff resolves it.
+        """
+        out: set[str] = set()
+        for seq in {r.get("seq") for r in self.records if r.get("state") == "attempt"}:
+            if self.status(seq) != "unknown":
+                continue
+            att = self._attempt_rec(seq)
+            if att and att.get("playlist_id") == playlist_id and att.get("action") == action:
+                out |= set(att.get("uris") or [])
+        return out
+
+    def record_gate_pass(self, gate: str, run_id: str) -> None:
+        self.note("gate_pass", gate=gate, run_id=run_id, config_id=self.config_id,
+                  journal_len=len(self.records))
+
+    def gate_passed(self, gate: str, run_id: str) -> bool:
+        """Whether `gate` holds for the CURRENT run and journal state.
+
+        A gate authorises irreversible deletes, so it is bound to the run that earned it
+        and to the journal state at that moment. A pass from an earlier invocation
+        proves nothing about the account now — the owner may have changed a playlist in
+        between — and anything journalled afterwards other than phase-3 work means the
+        verified state has moved on.
+        """
+        last = None
+        for i, rec in enumerate(self.records):
+            if (rec.get("state") == "note" and rec.get("kind") == "gate_pass"
+                    and rec.get("gate") == gate and rec.get("run_id") == run_id
+                    and rec.get("config_id") == self.config_id):
+                last = i
+        if last is None:
+            return False
+        phase_of_seq = {r["seq"]: r.get("phase") for r in self.records
+                        if r.get("state") == "attempt" and "seq" in r}
+        for rec in self.records[last + 1:]:
+            if rec.get("state") == "attempt" and rec.get("phase") != 3:
+                return False
+            if rec.get("state") == "done" and phase_of_seq.get(rec.get("seq")) != 3:
+                return False
+        return True
 
 
 # --------------------------------------------------------------------------- #
 # API plumbing
 # --------------------------------------------------------------------------- #
 
-class Api:
-    """Paced, 429-aware spotipy wrapper with a per-endpoint call counter."""
+def _retry_after_seconds(exc) -> int | None:
+    headers = getattr(exc, "headers", None) or {}
+    # HTTP/2 lowercases header names; don't miss it on case.
+    header = next((v for k, v in headers.items() if k.lower() == "retry-after"), None)
+    if header is None:
+        return None
+    try:
+        return int(header)
+    except (TypeError, ValueError):
+        # RFC 9110 also permits an HTTP-date. Spotify sends seconds, so an unparseable
+        # value is treated as "no usable hint" rather than guessed at.
+        return None
 
-    def __init__(self, journal: Journal, counters_path: Path):
-        spotify_api = _load_spotify()
-        sp = spotify_api.Client().sp
+
+class Api:
+    """Paced, 429-aware spotipy wrapper with a per-endpoint daily call counter.
+
+    Every API call in the run goes through `call()`, so quota semantics are inherited
+    rather than reimplemented per phase: a 429 either sleeps (short Retry-After) or
+    raises QuotaExhausted, a transient 5xx gets one bounded retry, and every other
+    failure becomes a PlanHalt so the journal records a checkpoint instead of the run
+    dying on an escaped traceback.
+    """
+
+    def __init__(self, counters_path: Path, sp=None):
+        if sp is None:
+            spotify_api = _load_spotify()
+            sp = spotify_api.Client().sp
         # spotipy wires 429 into urllib3's Retry at __init__ and urllib3 honors
-        # Retry-After by sleeping INSIDE the request; rebuild the session with
-        # retries zeroed so 429s surface to call() with the header intact.
+        # Retry-After by sleeping INSIDE the request; rebuild the session with retries
+        # zeroed so 429s surface to call() with the header intact.
         sp.retries = 0
         sp.status_retries = 0
         sp.status_forcelist = []
         if hasattr(sp, "_build_session"):
             sp._build_session()
         self.sp = sp
-        self.journal = journal
         self.counters_path = counters_path
         self.counters = self._load_counters()
         self._last_call = 0.0
 
     def _load_counters(self) -> dict:
         if self.counters_path.exists():
-            return json.loads(self.counters_path.read_text())
+            try:
+                return json.loads(self.counters_path.read_text())
+            except json.JSONDecodeError:
+                print("  counters file unreadable — starting a fresh one")
         return {}
 
     def _bump(self, endpoint: str) -> None:
         day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        self.counters.setdefault(day, {})
-        self.counters[day][endpoint] = self.counters[day].get(endpoint, 0) + 1
-        self.counters[day]["_total"] = self.counters[day].get("_total", 0) + 1
-        self.counters_path.write_text(json.dumps(self.counters, indent=1))
+        today = self.counters.setdefault(day, {})
+        today[endpoint] = today.get(endpoint, 0) + 1
+        today["_total"] = today.get("_total", 0) + 1
+        # temp+rename so a kill mid-write cannot leave the quota record truncated
+        tmp = self.counters_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self.counters, indent=1))
+        os.replace(tmp, self.counters_path)
+
+    def calls_today(self) -> int:
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        return self.counters.get(day, {}).get("_total", 0)
 
     def call(self, endpoint: str, fn, *args, **kwargs):
         """One paced API call. Raises QuotaExhausted on any hard 429."""
-        wait = PACE_SECONDS - (time.monotonic() - self._last_call)
-        if wait > 0:
-            time.sleep(wait)
-        self._bump(endpoint)
-        try:
-            result = fn(*args, **kwargs)
-        except requests.exceptions.RetryError as exc:
-            # Only reachable if the session rebuild above was skipped — the 429
-            # response (and its Retry-After) is already consumed at this point.
-            raise QuotaExhausted("internal retries exhausted on 429") from exc
-        finally:
-            self._last_call = time.monotonic()
-        return result
-
-
-def handle_spotify_error(exc: SpotifyException) -> None:
-    """Translate a SpotifyException into halt/quota semantics, or re-raise."""
-    if exc.http_status != 429:
-        raise exc
-    headers = getattr(exc, "headers", None) or {}
-    # HTTP/2 lowercases header names; don't miss it on case.
-    header = next((v for k, v in headers.items() if k.lower() == "retry-after"), None)
-    if header is None:
-        # Community consensus: a 429 without Retry-After means the daily quota
-        # is gone; probing further only risks extending the penalty.
-        raise QuotaExhausted("429 with no Retry-After header — day over")
-    retry_after = int(header)
-    if retry_after > QUOTA_STOP_SECONDS:
-        raise QuotaExhausted(f"Retry-After {retry_after}s — daily quota exhausted")
-    print(f"  429 with Retry-After {retry_after}s — sleeping", flush=True)
-    time.sleep(retry_after)
+        transient_budget = 1
+        for _ in range(6):
+            wait = PACE_SECONDS - (time.monotonic() - self._last_call)
+            if wait > 0:
+                time.sleep(wait)
+            self._bump(endpoint)
+            try:
+                return fn(*args, **kwargs)
+            except Exception as exc:
+                if requests is not None and isinstance(exc, requests.exceptions.RetryError):
+                    # Only reachable if the session rebuild was skipped — the 429
+                    # response and its Retry-After are already consumed.
+                    raise QuotaExhausted("internal retries exhausted on 429") from exc
+                if requests is not None and isinstance(exc, requests.exceptions.RequestException):
+                    raise PlanHalt(f"{endpoint} transport failure: {exc}") from exc
+                if SpotifyException is None or not isinstance(exc, SpotifyException):
+                    raise
+                status = getattr(exc, "http_status", None)
+                if status == 429:
+                    retry_after = _retry_after_seconds(exc)
+                    if retry_after is None:
+                        # Community consensus: a 429 without a usable Retry-After means
+                        # the daily quota is gone; probing further risks extending it.
+                        raise QuotaExhausted("429 with no usable Retry-After header — day over")
+                    if retry_after > QUOTA_STOP_SECONDS:
+                        raise QuotaExhausted(f"Retry-After {retry_after}s — daily quota exhausted")
+                    print(f"    429 with Retry-After {retry_after}s — sleeping", flush=True)
+                    time.sleep(retry_after)
+                elif status in TRANSIENT_STATUS and transient_budget > 0:
+                    transient_budget -= 1
+                    print(f"    {status} — one bounded retry", flush=True)
+                    time.sleep(PACE_SECONDS * 2)
+                else:
+                    # A 403 on create is the expected shape if playlist writes turn out
+                    # to be outside this dev-mode app's permitted endpoint set.
+                    raise PlanHalt(f"{endpoint} failed with HTTP {status}: {exc}") from exc
+            finally:
+                self._last_call = time.monotonic()
+        raise PlanHalt(f"{endpoint} exhausted its retry patience")
 
 
 def fetch_uris(api: Api, playlist_id: str) -> list[str]:
     """Every track URI in a playlist, in order (100/page — the cheapest read).
 
-    Uses the same stored-identity rule as scripts/export_playlists.py: with a
-    market context Spotify relinks stale URIs and returns the playable
-    replacement, while `linked_from` holds what the playlist actually stores.
-    Removals and diffs must key on the stored identity, so `linked_from.uri`
-    wins when present — otherwise a relinked row would look like a mismatch.
+    Uses the same stored-identity rule as scripts/export_playlists.py: with a market
+    context Spotify relinks stale URIs and returns the playable replacement, while
+    `linked_from` holds what the playlist actually stores. Removals and diffs must key
+    on the stored identity, so `linked_from.uri` wins when present.
     """
     uris: list[str] = []
     offset = 0
@@ -299,9 +434,41 @@ def fetch_uris(api: Api, playlist_id: str) -> list[str]:
 
 
 def fetch_snapshot_total(api: Api, playlist_id: str) -> tuple[str | None, int | None]:
-    info = api.call("playlist", api.sp.playlist, playlist_id,
-                    fields="snapshot_id,tracks.total")
+    info = api.call("playlist", api.sp.playlist, playlist_id, fields="snapshot_id,tracks.total")
     return (info or {}).get("snapshot_id"), ((info or {}).get("tracks") or {}).get("total")
+
+
+def _write_snapshot(api: Api, endpoint: str, fn, *args, **kwargs) -> str:
+    """One write, returning the snapshot_id that proves it landed."""
+    res = api.call(endpoint, fn, *args, **kwargs)
+    snap = (res or {}).get("snapshot_id")
+    if not snap:
+        raise PlanHalt(f"{endpoint} returned no snapshot_id — refusing to journal it as done")
+    return snap
+
+
+def resolve_pid(op: dict, created: dict[str, str]) -> str:
+    pid = op["playlist_id_or_name"]
+    if pid.startswith("<"):
+        name = op.get("playlist_name") or ""
+        if name not in created:
+            raise PlanHalt(f"playlist {name!r} has not been created yet — run phase 1 first")
+        return created[name]
+    return pid
+
+
+def _confirm(message: str, assume_yes: bool) -> None:
+    if assume_yes:
+        print(f"  ({message} — accepted via --yes)")
+        return
+    if not sys.stdin.isatty():
+        raise PlanHalt(f"{message}: stdin is not a terminal — rerun with --yes to acknowledge")
+    try:
+        reply = input(f"  {message}? [yes/NO] ").strip().lower()
+    except EOFError:
+        raise PlanHalt(f"{message}: no input available — rerun with --yes to acknowledge")
+    if reply != "yes":
+        raise PlanHalt("halted by operator")
 
 
 # --------------------------------------------------------------------------- #
@@ -316,15 +483,13 @@ def dry_run(plan: dict) -> None:
     print()
     calls = 0
     for phase in (0, 1, 2, 2.5, 3, 4):
-        ops = [o for o in plan["ops"] if o["phase"] == phase]
+        ops = [(seq, o) for seq, o in enumerate(plan["ops"]) if o["phase"] == phase]
         if not ops:
             continue
-        pcalls = sum(o.get("calls", 0) for o in ops)
+        pcalls = sum(o.get("calls", 0) for _, o in ops)
         calls += pcalls
         print(f"--- phase {phase}: {len(ops)} ops, {pcalls} call(s) ---")
-        for seq, op in enumerate(plan["ops"]):
-            if op["phase"] != phase:
-                continue
+        for seq, op in ops:
             target = op.get("playlist_name") or op["playlist_id_or_name"]
             bits = [f"[{seq:3d}]", f"{op['action']:<20}", f"{target:<24}"]
             if "count" in op:
@@ -345,61 +510,126 @@ def dry_run(plan: dict) -> None:
 # phases
 # --------------------------------------------------------------------------- #
 
-def resolve_pid(op: dict, created: dict[str, str]) -> str:
-    pid = op["playlist_id_or_name"]
-    if pid.startswith("<"):
-        name = op.get("playlist_name") or ""
-        if name not in created:
-            raise PlanHalt(f"playlist {name!r} has not been created yet — run phase 1 first")
-        return created[name]
-    return pid
+def phase0(api: Api, plan: dict, journal: Journal, resume: bool) -> None:
+    """Verify every playlist still matches the baseline the plan was generated from.
 
-
-def phase0(api: Api, plan: dict, journal: Journal, resume: bool) -> dict[str, str]:
-    """Drift check. Returns {playlist_name: 'positional'} for playlists that must
-    not use bare-URI removal."""
+    Any divergence raises PlanDrift. Every mutation moves `snapshot_id`, so comparing
+    it (plus the count) detects drift completely without reading a single track.
+    """
     print("=== phase 0 — drift check ===")
-    positional: dict[str, str] = {}
-    removes = plan["remove_detail"]
+    drifted: list[dict] = []
     for seq, op in enumerate(plan["ops"]):
         if op["phase"] != 0 or op["action"] != "snapshot_check":
             continue
         name, pid = op["playlist_name"], op["playlist_id_or_name"]
-        journal.attempt(seq, op)
-        try:
-            snap, total = fetch_snapshot_total(api, pid)
-        except SpotifyException as exc:
-            handle_spotify_error(exc)
-            snap, total = fetch_snapshot_total(api, pid)
-        journal.done(seq, ok=True, snapshot_id=snap, detail=f"total={total}")
+        journal.attempt(seq, op, pid)
+        snap, total = fetch_snapshot_total(api, pid)
+        journal.done(seq, ok=True, snapshot_id=snap, placeholder=True, detail=f"total={total}")
 
-        # M4: on a resume, our own writes have already moved the snapshot, so the
-        # cold-start export values are stale by construction. Compare against the
-        # journal instead.
-        journalled = journal.last_snapshot(pid) if resume else None
-        expected_snap = journalled or op["cold_start_expected_snapshot_id"]
-        if snap == expected_snap:
+        # On a resume our own writes have already moved the snapshot and the count, so
+        # the baseline is the export adjusted by what the journal says we did. An
+        # in-flight write whose outcome is UNKNOWN may or may not have landed, so it
+        # widens the acceptable total into a range and makes the snapshot uninformative
+        # — phase 2's per-op diff is what resolves it.
+        added = len(journal.done_write_uris(pid, "add_tracks")) if resume else 0
+        removed = len(journal.done_write_uris(pid, "remove_tracks")) if resume else 0
+        pending_add = len(journal.pending_write_uris(pid, "add_tracks")) if resume else 0
+        pending_rm = len(journal.pending_write_uris(pid, "remove_tracks")) if resume else 0
+        expected_snap = (journal.last_snapshot(pid) if resume else None) \
+            or op["cold_start_expected_snapshot_id"]
+        expected_total = op["cold_start_expected_total"] + added - removed
+
+        live = None
+        if pending_add or pending_rm:
+            live = fetch_uris(api, pid)
+            if not _unexplained_by_pending(plan, journal, name, pid, live):
+                print(f"  {name:<20} in-flight write pending — contents explained")
+                continue
+        elif snap == expected_snap and total == expected_total:
             print(f"  {name:<20} unchanged")
             continue
 
-        print(f"  {name:<20} DRIFT (snapshot {expected_snap} -> {snap}, total {total})")
+        detail = _classify_drift(api, plan, journal, name, pid, total, expected_total, resume,
+                                 live=live)
+        detail.update({"playlist": name, "playlist_id": pid,
+                       "expected_snapshot_id": expected_snap, "live_snapshot_id": snap})
+        drifted.append(detail)
+        print(f"  {name:<20} DRIFT — {'; '.join(detail['classes'])}")
+
+    if drifted:
+        journal.note("drift_detected", playlists=[d["playlist"] for d in drifted], detail=drifted)
+        lines = []
+        for d in drifted:
+            lines.append(f"    · {d['playlist']}: {'; '.join(d['classes'])}")
+            for uri in d["vanished"][:5]:
+                lines.append(f"        vanished removal target {uri}")
+            for uri in d["duplicated"][:5]:
+                lines.append(f"        removal target duplicated {uri}")
+        raise PlanDrift("playlist state drifted — re-export and regenerate the plan\n"
+                        + "\n".join(lines))
+
+
+def _export_baseline(plan: dict, name: str) -> Counter:
+    """The playlist's contents at export time, as a multiset.
+
+    Reconstructed from the plan rather than carried separately: the end state is the
+    baseline minus the planned removals plus the planned adds, so inverting that gives
+    the baseline back exactly.
+    """
+    baseline = Counter(plan["expected_end_state"][name])
+    baseline -= Counter(e["uri"] for e in plan["add_detail"].get(name, []))
+    baseline += Counter(e["uri"] for e in plan["remove_detail"].get(name, []))
+    return baseline
+
+
+def _unexplained_by_pending(plan: dict, journal: Journal, name: str, pid: str,
+                            live: list[str]) -> dict[str, int]:
+    """Differences between live contents and what the journal can account for.
+
+    A write whose outcome is UNKNOWN makes the playlist's *count* ambiguous but not its
+    *content*: the runner knows exactly which URIs that op would have written, so each
+    URI may differ from the journal-adjusted baseline by at most what the pending op
+    would explain. Anything else is an owner edit, including count-neutral ones that a
+    range check on the total cannot see.
+    """
+    expected = _export_baseline(plan, name)
+    expected += Counter(journal.done_write_uris(pid, "add_tracks"))
+    expected -= Counter(journal.done_write_uris(pid, "remove_tracks"))
+    slack_add = Counter(journal.pending_write_uris(pid, "add_tracks"))
+    slack_rm = Counter(journal.pending_write_uris(pid, "remove_tracks"))
+    live_counts = Counter(live)
+    unexplained: dict[str, int] = {}
+    for uri in set(expected) | set(live_counts) | set(slack_add) | set(slack_rm):
+        delta = live_counts[uri] - expected[uri]
+        if not -slack_rm[uri] <= delta <= slack_add[uri]:
+            unexplained[uri] = delta
+    return unexplained
+
+
+def _classify_drift(api: Api, plan: dict, journal: Journal, name: str, pid: str,
+                    total: int | None, expected_total: int, resume: bool,
+                    live: list[str] | None = None) -> dict:
+    """Describe how a playlist diverged, so the halt message is actionable.
+
+    Costs one paged read of an already-doomed run; the alternative is telling the owner
+    only that something changed.
+    """
+    classes = ["snapshot mismatch"]
+    if total != expected_total:
+        classes.append(f"count {total} vs expected {expected_total}")
+    if live is None:
         live = fetch_uris(api, pid)
-        # M3: bare-URI DELETE removes every occurrence, so a newly duplicated URI
-        # would take the owner's fresh copy with it. Re-check and fall back.
-        targets = [r["uri"] for r in removes.get(name, [])]
-        dupes = [u for u in set(targets) if live.count(u) > 1]
-        if dupes:
-            positional[name] = "duplicate URI present after drift"
-            print(f"    {len(dupes)} removal target(s) now appear twice — switching {name} to "
-                  f"snapshot-guarded POSITIONAL removal")
-            journal.note("positional_fallback", playlist=name, uris=dupes)
-        already_removed = journal.done_write_uris(pid, "remove_tracks") if resume else set()
-        missing = [u for u in targets if u not in live and u not in already_removed]
-        if missing:
-            journal.note("drift_missing_uris", playlist=name, uris=missing)
-            print(f"    {len(missing)} removal target(s) vanished with no done-op — their ops and "
-                  f"paired partners must be dropped (see journal)")
-    return positional
+    planned = [entry["uri"] for entry in plan["remove_detail"].get(name, [])]
+    ours = (journal.done_write_uris(pid, "remove_tracks")
+            | journal.pending_write_uris(pid, "remove_tracks")) if resume else set()
+    vanished = [u for u in planned if u not in live and u not in ours]
+    duplicated = [u for u in set(planned) if live.count(u) > 1]
+    if vanished:
+        classes.append(f"{len(vanished)} removal target(s) vanished")
+    if duplicated:
+        classes.append(f"{len(duplicated)} removal target(s) duplicated")
+    return {"classes": classes, "vanished": vanished, "duplicated": duplicated,
+            "live_total": total}
 
 
 def phase1(api: Api, plan: dict, journal: Journal, assume_yes: bool) -> dict[str, str]:
@@ -414,8 +644,8 @@ def phase1(api: Api, plan: dict, journal: Journal, assume_yes: bool) -> dict[str
             print(f"  {name:<24} already created ({created[name]})")
             continue
         if state == "unknown":
-            # S2: the id was never journalled, so a blind replay would make a
-            # second playlist with the same name. Adopt an empty one instead.
+            # The id was never journalled, so a blind replay would make a second
+            # playlist with the same name. Adopt an empty one instead.
             print(f"  {name:<24} dangling create — searching for an existing empty one")
             found = _find_empty_playlist(api, name)
             if found:
@@ -424,14 +654,9 @@ def phase1(api: Api, plan: dict, journal: Journal, assume_yes: bool) -> dict[str
                 print(f"    adopted {found}")
                 continue
         body = op["body"]
-        journal.attempt(seq, op)
-        try:
-            res = api.call("create_playlist", api.sp.current_user_playlist_create,
-                           body["name"], public=body["public"], description=body["description"])
-        except SpotifyException as exc:
-            handle_spotify_error(exc)
-            res = api.call("create_playlist", api.sp.current_user_playlist_create,
-                           body["name"], public=body["public"], description=body["description"])
+        journal.attempt(seq, op, name)
+        res = api.call("create_playlist", api.sp.current_user_playlist_create,
+                       body["name"], public=body["public"], description=body["description"])
         pid = (res or {}).get("id")
         if not pid:
             journal.done(seq, ok=False, detail="no playlist id in response")
@@ -439,149 +664,137 @@ def phase1(api: Api, plan: dict, journal: Journal, assume_yes: bool) -> dict[str
         journal.done(seq, ok=True, http_status=201, playlist_id=pid)
         created[name] = pid
         print(f"  {name:<24} created {pid}")
-        if op.get("canary") and not assume_yes:
-            _canary_gate(f"first playlist created ({pid}). Confirm it looks right in Spotify")
+        if op.get("canary"):
+            _confirm(f"first playlist created ({pid}) — confirm it looks right in Spotify",
+                     assume_yes)
     return created
 
 
 def _find_empty_playlist(api: Api, name: str) -> str | None:
+    """An owner-owned, empty playlist of this name, or None.
+
+    Ownership matters: current_user_playlists also returns followed playlists, and
+    adopting someone else's empty playlist would 403 every subsequent add.
+    """
+    me_id = (api.call("me", api.sp.me) or {}).get("id")
     offset = 0
     while True:
         page = api.call("me_playlists", api.sp.current_user_playlists, limit=50, offset=offset)
         items = (page or {}).get("items") or []
-        for it in items:
-            if it.get("name") == name and ((it.get("tracks") or {}).get("total") == 0):
-                return it.get("id")
-        offset += 50
-        if offset >= ((page or {}).get("total") or 0):
+        for item in items:
+            if (item.get("name") == name
+                    and ((item.get("tracks") or {}).get("total") == 0)
+                    and ((item.get("owner") or {}).get("id") == me_id)):
+                return item.get("id")
+        offset += len(items)
+        if not items or not (page or {}).get("next"):
             return None
-
-
-def _canary_gate(message: str) -> None:
-    print(f"\n  CANARY STOP — {message}.")
-    reply = input("  continue? [yes/NO] ").strip().lower()
-    if reply != "yes":
-        raise PlanHalt("halted at canary gate by operator")
 
 
 def phase2(api: Api, plan: dict, journal: Journal, created: dict[str, str],
            assume_yes: bool) -> None:
     print("=== phase 2 — adds ===")
+    missing = sorted({p["name"] for p in plan["new_playlists"]} - set(created))
+    if missing:
+        raise PlanHalt(f"phase 2 gate: these playlists do not exist yet: {missing} — run phase 1")
+
     for seq, op in enumerate(plan["ops"]):
         if op["phase"] != 2 or op["action"] != "add_tracks":
             continue
         pid = resolve_pid(op, created)
         label = f"{op['playlist_name']} {op['chunk_index'] + 1}/{op['chunks_total']}"
-        state = journal.status(seq)
-        if state == "done":
+        if journal.status(seq) == "done":
             print(f"  {label:<30} already done")
             continue
+
         uris = list(op["uris"])
-        if state == "unknown":
-            # M1: never blind-replay an add. Diff first.
+        if journal.status(seq) == "unknown":
+            # Never blind-replay an add: a replay appends a second copy.
             live = fetch_uris(api, pid)
-            present = [u for u in uris if u in live]
-            if len(present) == len(uris):
-                journal.done(seq, ok=True, snapshot_id="verified-by-diff",
-                             detail="all uris already present")
+            if all(live.count(u) == 1 for u in uris):
+                journal.done(seq, ok=True, snapshot_id="verified-by-diff", placeholder=True,
+                             detail="all uris already present exactly once")
                 print(f"  {label:<30} verified present by diff")
                 continue
-            uris = [u for u in uris if u not in live]
+            uris = [u for u in uris if live.count(u) == 0]
             print(f"  {label:<30} partial — adding {len(uris)} missing uri(s)")
-        journal.attempt(seq, dict(op, uris=uris))
-        snap = _write_with_retry(api, "add_tracks", api.sp.playlist_add_items, pid, uris)
+            if not uris:
+                raise PlanHalt(f"{label}: some URIs are present more than once — a prior replay "
+                               "duplicated them; resolve by hand before continuing")
+
+        journal.attempt(seq, op, pid, uris=uris)
+        snap = _write_snapshot(api, "add_tracks", api.sp.playlist_add_items, pid, uris)
         journal.done(seq, ok=True, http_status=201, snapshot_id=snap)
         print(f"  {label:<30} +{len(uris)}")
-        if op.get("canary") and not assume_yes:
-            _canary_gate(f"first track write landed in {op['playlist_name']} (snapshot {snap})")
+        if op.get("canary"):
+            _confirm(f"first track write landed in {op['playlist_name']} (snapshot {snap})",
+                     assume_yes)
 
 
-def phase25(api: Api, plan: dict, journal: Journal, created: dict[str, str]) -> None:
-    """M2: the hard gate for phase 3. Every add target's total must match."""
+def phase25(api: Api, plan: dict, journal: Journal, created: dict[str, str],
+            run_id: str) -> None:
+    """The hard gate for phase 3: every add target's total must match.
+
+    Phase 0 has already proved the export baseline is the live baseline, so the only
+    other movement to account for is removals this run already completed — which is
+    what makes resuming mid-phase-3 possible.
+    """
     print("=== phase 2.5 — verify every add landed (HARD GATE for phase 3) ===")
+    # The journal check is free, so it runs first: a gate invoked before phase 2 has
+    # finished fails without spending 17 calls proving what the journal already knows.
+    unfinished = [op["playlist_name"] for seq, op in enumerate(plan["ops"])
+                  if op["phase"] == 2 and op["action"] == "add_tracks"
+                  and journal.status(seq) != "done"]
+    if unfinished:
+        raise PlanHalt(f"phase 2.5 gate failed: {len(unfinished)} phase-2 add op(s) are not done "
+                       f"({sorted(set(unfinished))}) — finish phase 2 before phase 3")
+
     failures = []
     for seq, op in enumerate(plan["ops"]):
         if op["phase"] != 2.5 or op["action"] != "verify_total":
             continue
         pid = resolve_pid(op, created)
-        journal.attempt(seq, op)
-        try:
-            _, total = fetch_snapshot_total(api, pid)
-        except SpotifyException as exc:
-            handle_spotify_error(exc)
-            _, total = fetch_snapshot_total(api, pid)
-        ok = total == op["expected_total"]
-        journal.done(seq, ok=True, snapshot_id="n/a-read", detail=f"total={total} expected={op['expected_total']}")
-        flag = "ok" if ok else "MISMATCH"
-        print(f"  {op['playlist_name']:<24} {total:>4} / {op['expected_total']:<4} {flag}")
+        name = op["playlist_name"]
+        removed = len(journal.done_write_uris(pid, "remove_tracks"))
+        expected = op["expected_total"] - removed
+        journal.attempt(seq, op, pid)
+        _, total = fetch_snapshot_total(api, pid)
+        ok = total == expected
+        journal.done(seq, ok=True, snapshot_id="n/a-read", placeholder=True,
+                     detail=f"total={total} expected={expected}")
+        adjust = f" (less {removed} already removed)" if removed else ""
+        print(f"  {name:<24} {total:>4} / {expected:<4}{adjust} {'ok' if ok else 'MISMATCH'}")
         if not ok:
-            failures.append((op["playlist_name"], total, op["expected_total"]))
-    # all phase-2 ops must also be done with success evidence
-    for seq, op in enumerate(plan["ops"]):
-        if op["phase"] == 2 and op["action"] == "add_tracks" and journal.status(seq) != "done":
-            failures.append((op["playlist_name"], "phase-2 op not done", seq))
+            failures.append((name, total, expected))
     if failures:
         raise PlanHalt(f"phase 2.5 gate failed: {failures} — finish the adds before phase 3")
+    journal.record_gate_pass(GATE_PHASE25, run_id)
     print("  gate passed")
 
 
-def phase3(api: Api, plan: dict, journal: Journal, positional: dict[str, str]) -> None:
+def phase3(api: Api, plan: dict, journal: Journal, created: dict[str, str],
+           run_id: str) -> None:
     print("=== phase 3 — removals ===")
+    # Phase 3 is the only irreversible phase, so it proves its own precondition rather
+    # than trusting the caller's phase sequencing.
+    if not journal.gate_passed(GATE_PHASE25, run_id):
+        print("  no phase-2.5 pass for this run — running the gate now")
+        phase25(api, plan, journal, created, run_id)
+
     for seq, op in enumerate(plan["ops"]):
         if op["phase"] != 3 or op["action"] != "remove_tracks":
             continue
-        name, pid = op["playlist_name"], op["playlist_id_or_name"]
+        name, pid = op["playlist_name"], resolve_pid(op, created)
         label = f"{name} {op['chunk_index'] + 1}/{op['chunks_total']}"
         if journal.status(seq) == "done":
             print(f"  {label:<30} already done")
             continue
         uris = list(op["uris"])
-        journal.attempt(seq, op)
-        if name in positional:
-            snap, _ = fetch_snapshot_total(api, pid)
-            live = fetch_uris(api, pid)
-            items = [{"uri": u, "positions": [i for i, x in enumerate(live) if x == u]}
-                     for u in uris if u in live]
-            new_snap = _write_with_retry(api, "remove_specific",
-                                         api.sp.playlist_remove_specific_occurrences_of_items,
-                                         pid, items, snapshot_id=snap)
-            journal.done(seq, ok=True, http_status=200, snapshot_id=new_snap,
-                         detail="positional removal (drifted playlist)")
-            print(f"  {label:<30} -{len(items)} (positional)")
-            continue
-        new_snap = _write_with_retry(api, "remove_tracks",
-                                     api.sp.playlist_remove_all_occurrences_of_items, pid, uris)
-        journal.done(seq, ok=True, http_status=200, snapshot_id=new_snap)
+        journal.attempt(seq, op, pid, uris=uris)
+        snap = _write_snapshot(api, "remove_tracks",
+                               api.sp.playlist_remove_all_occurrences_of_items, pid, uris)
+        journal.done(seq, ok=True, http_status=200, snapshot_id=snap)
         print(f"  {label:<30} -{len(uris)}")
-
-
-def _write_with_retry(api: Api, endpoint: str, fn, *args, **kwargs) -> str:
-    """One write, returning its snapshot_id.
-
-    A 429 gets the repo's halt/sleep semantics (and a short sleep does not consume
-    the 5xx budget). A transient 5xx gets exactly one bounded retry — safe here
-    only because the caller has already diff-verified anything ambiguous.
-    """
-    transient_retries = 1
-    for _ in range(6):
-        try:
-            res = api.call(endpoint, fn, *args, **kwargs)
-        except SpotifyException as exc:
-            if exc.http_status in OK_TRANSIENT:
-                if transient_retries <= 0:
-                    raise PlanHalt(f"{endpoint} still failing with {exc.http_status} after a "
-                                   "bounded retry")
-                transient_retries -= 1
-                print(f"    {exc.http_status} — one bounded retry")
-                time.sleep(PACE_SECONDS * 2)
-                continue
-            handle_spotify_error(exc)   # sleeps on a short Retry-After, else raises
-            continue
-        snap = (res or {}).get("snapshot_id")
-        if not snap:
-            raise PlanHalt(f"{endpoint} returned no snapshot_id — refusing to journal it as done")
-        return snap
-    raise PlanHalt(f"{endpoint} exhausted its retry patience")
 
 
 def phase4(api: Api, plan: dict, journal: Journal, created: dict[str, str]) -> int:
@@ -594,16 +807,12 @@ def phase4(api: Api, plan: dict, journal: Journal, created: dict[str, str]) -> i
             continue
         name = op["playlist_name"]
         pid = resolve_pid(op, created)
-        journal.attempt(seq, op)
+        journal.attempt(seq, op, pid)
         live = fetch_uris(api, pid)
         want = expected[name]
-        if name in new_names:
-            ok = live == want                      # S3: order matters for the new playlists
-            mode = "ordered"
-        else:
-            ok = sorted(live) == sorted(want)
-            mode = "multiset"
-        journal.done(seq, ok=True, snapshot_id="n/a-read",
+        ok = live == want if name in new_names else sorted(live) == sorted(want)
+        mode = "ordered" if name in new_names else "multiset"
+        journal.done(seq, ok=True, snapshot_id="n/a-read", placeholder=True,
                      detail=f"{mode} match={ok} live={len(live)} expected={len(want)}")
         print(f"  {name:<24} {len(live):>4} / {len(want):<4} {mode:<9} "
               f"{'ok' if ok else 'MISMATCH'}")
@@ -618,6 +827,64 @@ def phase4(api: Api, plan: dict, journal: Journal, created: dict[str, str]) -> i
 
 # --------------------------------------------------------------------------- #
 
+def run(plan: dict, args, sp=None) -> int:
+    journal_path = args.journal or args.plan.parent / "apply_journal.jsonl"
+    counters_path = args.plan.parent / "apply_run_counters.json"
+    run_id = uuid.uuid4().hex
+    journal = None
+    api = None
+    try:
+        journal = Journal(journal_path, plan["config_id"])
+        api = Api(counters_path, sp=sp)
+        journal.note("run_start", run_id=run_id, phase=args.phase, resume=args.resume)
+        print(f"plan {args.plan.name} · config {plan['config_id']} · journal {journal_path.name}")
+        print(f"run {run_id[:8]} · pace {PACE_SECONDS}s/call · budget "
+              f"{plan['budget']['total']['calls_expected']} calls "
+              f"({plan['budget']['total']['write_calls']} writes)\n")
+
+        wanted = args.phase
+        created = journal.created_playlists()
+        if wanted in (None, 0):
+            phase0(api, plan, journal, args.resume)
+        if wanted in (None, 1):
+            created = phase1(api, plan, journal, args.yes)
+        if wanted in (None, 2):
+            phase2(api, plan, journal, created, args.yes)
+        if wanted in (None, 2.5):
+            phase25(api, plan, journal, created, run_id)
+        if wanted in (None, 3):
+            phase3(api, plan, journal, created, run_id)
+        if wanted in (None, 4):
+            if wanted is None:
+                print(f"\ncooling down {PHASE4_COOLDOWN_SECONDS}s before verification\n")
+                time.sleep(PHASE4_COOLDOWN_SECONDS)
+            problems = phase4(api, plan, journal, created)
+            journal.note("run_complete", mismatches=problems, calls_today=api.calls_today())
+            print(f"\n{'FAILED' if problems else 'OK'} — {problems} playlist mismatch(es); "
+                  f"{api.calls_today()} calls today (see apply_run_counters.json)")
+            return EXIT_MISMATCH if problems else EXIT_OK
+        return EXIT_OK
+    except PlanDrift as exc:
+        print(f"\nDRIFT — {exc}\n"
+              "  Re-export the affected playlists and regenerate apply_plan.json: the plan's "
+              "positions and counts are only valid against the export it was built from.")
+        return EXIT_DRIFT
+    except QuotaExhausted as exc:
+        calls = api.calls_today() if api else 0
+        if journal:
+            journal.note("quota_exhausted", reason=str(exc), calls_today=calls)
+        print(f"\nQUOTA EXHAUSTED ({exc}) — checkpointed after {calls} calls today "
+              f"(see apply_run_counters.json). Do not call again today; "
+              f"rerun with --resume tomorrow.")
+        return EXIT_QUOTA
+    except PlanHalt as exc:
+        calls = api.calls_today() if api else 0
+        if journal:
+            journal.note("halted", reason=str(exc), calls_today=calls)
+        print(f"\nHALTED — {exc}")
+        return EXIT_HALT
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -625,7 +892,7 @@ def main() -> None:
     ap.add_argument("--journal", type=Path, default=None,
                     help="journal path (default: <plan dir>/apply_journal.jsonl)")
     ap.add_argument("--resume", action="store_true",
-                    help="resume from the journal; phase 0 compares against journalled snapshots")
+                    help="resume from the journal; phase 0 compares against journalled state")
     ap.add_argument("--dry-run", action="store_true",
                     help="print the full op sequence and exit; makes zero API calls")
     ap.add_argument("--phase", type=float, default=None, help="run a single phase and stop")
@@ -634,58 +901,19 @@ def main() -> None:
 
     plan = json.loads(args.plan.read_text())
     if plan.get("hard_check_errors"):
-        # The generator's own invariants failed — most likely a half-applied
-        # toggle, which is the one edit that can delete both copies of a
-        # recording. Refuse even to dry-run it.
+        # The generator's own invariants failed — most likely a half-applied toggle,
+        # which is the one edit that can delete both copies of a recording.
         print(f"HALTED — plan carries {len(plan['hard_check_errors'])} hard-check error(s); "
               "regenerate it before executing:")
         for err in plan["hard_check_errors"]:
             print(f"  · {err}")
-        sys.exit(3)
+        sys.exit(EXIT_HALT)
 
     if args.dry_run:
         dry_run(plan)
-        return
+        sys.exit(EXIT_OK)
 
-    journal_path = args.journal or args.plan.parent / "apply_journal.jsonl"
-    journal = Journal(journal_path, plan["config_id"])
-    api = Api(journal, args.plan.parent / "apply_run_counters.json")
-    print(f"plan {args.plan.name} · config {plan['config_id']} · journal {journal_path.name}")
-    print(f"pace {PACE_SECONDS}s/call · budget {plan['budget']['total']['calls_expected']} calls "
-          f"({plan['budget']['total']['write_calls']} writes)\n")
-
-    wanted = args.phase
-    try:
-        positional: dict[str, str] = {}
-        created: dict[str, str] = journal.created_playlists()
-        if wanted in (None, 0):
-            positional = phase0(api, plan, journal, args.resume)
-        if wanted in (None, 1):
-            created = phase1(api, plan, journal, args.yes)
-        if wanted in (None, 2):
-            phase2(api, plan, journal, created, args.yes)
-        if wanted in (None, 2.5):
-            phase25(api, plan, journal, created)
-        if wanted in (None, 3):
-            phase3(api, plan, journal, positional)
-        if wanted in (None, 4):
-            if wanted is None:
-                print(f"\ncooling down {PHASE4_COOLDOWN_SECONDS}s before verification\n")
-                time.sleep(PHASE4_COOLDOWN_SECONDS)
-            problems = phase4(api, plan, journal, created)
-            journal.note("run_complete", mismatches=problems, calls=journal.calls)
-            print(f"\n{'FAILED' if problems else 'OK'} — {problems} playlist mismatch(es), "
-                  f"{journal.calls} calls this run")
-            sys.exit(1 if problems else 0)
-    except QuotaExhausted as exc:
-        journal.note("quota_exhausted", reason=str(exc), calls=journal.calls)
-        print(f"\nQUOTA EXHAUSTED ({exc}) — checkpointed after {journal.calls} calls. "
-              f"Do not call again today; rerun with --resume tomorrow.")
-        sys.exit(2)
-    except PlanHalt as exc:
-        journal.note("halted", reason=str(exc), calls=journal.calls)
-        print(f"\nHALTED — {exc}")
-        sys.exit(3)
+    sys.exit(run(plan, args))
 
 
 if __name__ == "__main__":
