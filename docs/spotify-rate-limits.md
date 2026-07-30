@@ -84,6 +84,27 @@ dated; the Feb 2026 API overhaul obsoleted most older figures.
 6. Instrument our own counters (no reliable rate-limit headers exist);
    log daily per-endpoint totals to back into the real cliff empirically.
 
+## Corrections after direct probing (2026-07-29)
+
+- **/search is 403-forbidden for this dev-mode app** — plain queries AND
+  `isrc:` filters. It is not rate-limited; it is outside the permitted
+  endpoint set for apps created after Feb 2026. Every "search" our first
+  audit made was an instant 403 (all 350 cached probes carry the error).
+- Therefore the ~13h penalty (Retry-After 46,649s) was earned by **~350
+  `/v1/tracks` GETs**, not by search volume — consistent with the community's
+  ~600/day cliff for that endpoint. Our earlier "900 searches caused it"
+  narrative was wrong.
+- Batch GET `/tracks?ids=` is also 403 (endpoint removed, as community
+  reported).
+- Playlist pages with `market="from_token"` DO carry `external_ids.isrc`,
+  `is_playable`, and `linked_from` on relinked entries — bulk per-track
+  metadata at 100 tracks/request. This is the workhorse read.
+- Consequence: Spotify-side catalog-visibility checks (the "is my copy
+  hidden from search" signal) are impossible for this app. Phantom classes
+  detectable: relinked (export-derived, free) and unplayable
+  (`is_playable: false`). Hidden-but-playable ghosts surface only when they
+  cause duplicates — which dedup catches via export ISRCs.
+
 ## Retry-After accessibility (why people think it's missing)
 
 - The header IS on the wire; browser JS just can't read it because Spotify

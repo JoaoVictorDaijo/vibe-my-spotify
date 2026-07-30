@@ -31,15 +31,20 @@ server's spotipy client and token cache:
 - `dedup_review.py DIR OUT.md` — checkbox review file from dedup + ISRC evidence
 
 Feb 2026 API notes: playlist items nest the track under `"item"`; batch GET
-endpoints are gone; search caps at 10 results. Rate limits are unpublished
-and were tightened hard in Feb 2026 — full community-measured picture in
+endpoints are gone (403); **/search is 403-forbidden for this app entirely**
+(both plain and `isrc:` queries — probe-verified 2026-07-29), so the MCP
+search tool and any search-based flow are dead: adds need URIs from exports
+or external sources. Playlist pages fetched with `market="from_token"` carry
+`external_ids.isrc`, `is_playable`, and relink via `linked_from` — the
+cheapest per-track data that exists (100/request). Rate limits are
+unpublished — full picture in
 [docs/spotify-rate-limits.md](docs/spotify-rate-limits.md). Operating rules:
 serialize requests at ≤1 req/s; daily quotas exist (staff-confirmed) — treat
-each day as a budget: per-track GETs ≈600/day measured, search unknown but
-scarce (~900 in one run earned a ~13h app-wide penalty), paged playlist reads
-are the cheapest per-track calls; chunk writes at ≤40 items; cache every
-probe/search result permanently; on ANY 429 stop the whole app, and a 429
-without Retry-After means the day's budget is gone. Extended quota mode is business-only (≥250k MAU; "AI/ML" is a
+each day as a budget: per-track GETs ≈350-600/day measured (our 13h penalty
+came from ~350 track GETs, not search — searches were 403ing all along);
+chunk writes at ≤40 items; cache every probe result permanently; on ANY 429
+stop the whole app, and a 429 without Retry-After means the day's budget is
+gone. Extended quota mode is business-only (≥250k MAU; "AI/ML" is a
 documented rejection reason) — design inside dev mode. Judgment stages run
 off exports on disk and need no API — a penalty only blocks audits and
 applies, not analysis. For recording-identity questions prefer MusicBrainz

@@ -145,6 +145,13 @@ def main() -> None:
                 time.sleep(PACE_SECONDS)
         except QuotaExhausted as e:
             print(f"quota exhausted ({e}) — checkpointed after {searched} searches; rerun to resume")
+        except SpotifyException as e:
+            if e.http_status == 403:
+                # Feb-2026 dev-mode apps lost /search entirely — the
+                # visibility tier cannot run; relink + unplayable stand alone.
+                print("search is 403-forbidden for this app — visibility tier unavailable")
+            else:
+                raise
         cache_path.write_text(json.dumps(cache, ensure_ascii=False))
 
     findings = []
