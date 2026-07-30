@@ -107,7 +107,11 @@ Archetypes created: Psychedelia 130, Heartland & Americana 89, Chamber Indie
 60, 90s Alternative 53, Laurel Canyon 49, Britpop 40 (owner-nurtured, under
 floor by choice). Overlay: Third Eye 55 (copies, dedup-exempt). Open homes:
 Alternative Rock 101, Rock 109, Acoustic/Folk 76. Empty shell kept: 70's
-Sunday Rock.
+Sunday Rock. Joined post-apply (2026-07-30, owner request): New Wave /
+Synthwave 109 — a PRIMARY HOME for synth-flavored tracks, dirty at intake
+(9 cross-roster dups, 2 internal edition dups, off-theme strays; evidence in
+vibes/new-wave-synthwave.md); cleanup pass needs an approved plan and
+reopens Indie Rock's synth-block question.
 
 Completed cycles: dedup pass (2026-07-23), full rebalance + drain + clustering
 + apply (2026-07-30). Next cycle lives in backlog issue #2 (Liked backfill +
