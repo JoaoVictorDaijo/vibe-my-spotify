@@ -70,6 +70,12 @@ landscape (Tidal = designated escape hatch):
   archetype, not just staging areas.
 - Niche/obtuse theme ideas get parked in the GitHub backlog issue and
   revisited only after the archetypes stabilize.
+- Two playlist types: archetypes are PRIMARY HOMES (tracks move there);
+  blessed niche standalones may be OVERLAYS holding copies fetched from
+  primary homes without removing them (Third Eye is the model). Overlay
+  playlists are exempt from cross-playlist dedup — their copies are
+  intentional. Overlays may also carry externally-suggested songs the owner
+  adds manually.
 
 ## Dedup policy (owner-approved)
 
