@@ -60,6 +60,17 @@ landscape (Tidal = designated escape hatch):
 - Opus re-judges every Sonnet verdict below high confidence (medium AND low).
 - Clustering and new-playlist proposals go straight to Opus.
 
+## Playlist architecture policy (owner-approved)
+
+- New playlists target ≥50 tracks; build big archetypes first. A narrow theme
+  must not strip songs from a viable bigger playlist.
+- Avoid single-band domination — a playlist that is mostly one or two bands
+  reads as an anthology, not a theme.
+- Reservoirs double as open playlists: legitimate homes for tracks fitting no
+  archetype, not just staging areas.
+- Niche/obtuse theme ideas get parked in the GitHub backlog issue and
+  revisited only after the archetypes stabilize.
+
 ## Dedup policy (owner-approved)
 
 - Same-recording confidence: identical ISRC = certain; duration within ±2s =
