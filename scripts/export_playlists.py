@@ -28,11 +28,20 @@ def _parse_items(items: list, offset: int) -> list[dict]:
         # responses used "track".
         t = item.get("item") or item.get("track") or {}
         album = t.get("album") or {}
+        linked = t.get("linked_from") or {}
         tracks.append(
             {
                 "pos": offset + i,
-                "uri": t.get("uri"),
-                "id": t.get("id"),
+                # With a market context Spotify relinks stale URIs: the object
+                # returned is the playable replacement and linked_from is what
+                # the playlist actually stores. Keep the stored identity as
+                # uri/id (removals and positions depend on it) and expose the
+                # replacement as canonical_id for phantom swaps.
+                "uri": linked.get("uri") or t.get("uri"),
+                "id": linked.get("id") or t.get("id"),
+                "canonical_id": t.get("id") if linked else None,
+                "isrc": (t.get("external_ids") or {}).get("isrc"),
+                "is_playable": t.get("is_playable"),
                 "name": t.get("name"),
                 "artists": [a.get("name") for a in (t.get("artists") or []) if a.get("name")],
                 "artist_ids": [a.get("id") for a in (t.get("artists") or []) if a.get("id")],
@@ -61,7 +70,7 @@ def export_playlist(sp, pid: str, info: dict | None = None) -> dict:
     tracks = []
     offset = 0
     while True:
-        page = sp.playlist_items(pid, limit=100, offset=offset)
+        page = sp.playlist_items(pid, limit=100, offset=offset, market="from_token")
         items = page.get("items") or []
         tracks.extend(_parse_items(items, offset))
         offset += len(items)
@@ -81,7 +90,7 @@ def export_liked(sp) -> dict:
     tracks = []
     offset = 0
     while True:
-        page = sp.current_user_saved_tracks(limit=50, offset=offset)
+        page = sp.current_user_saved_tracks(limit=50, offset=offset, market="from_token")
         items = page.get("items") or []
         tracks.extend(_parse_items(items, offset))
         offset += len(items)
@@ -111,6 +120,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("playlist_ids", nargs="*")
     ap.add_argument("--liked", action="store_true", help="export Liked Songs")
+    ap.add_argument("--force", action="store_true",
+                    help="re-export even when snapshot_id is unchanged")
     ap.add_argument("--out", required=True, type=Path)
     args = ap.parse_args()
 
@@ -122,7 +133,8 @@ def main() -> None:
         # snapshot means the cached export is still exact, skip the paging.
         info = sp.playlist(pid)
         existing = find_existing(args.out, pid)
-        if existing and existing.get("snapshot_id") and existing["snapshot_id"] == info.get("snapshot_id"):
+        if not args.force and existing and existing.get("snapshot_id") \
+                and existing["snapshot_id"] == info.get("snapshot_id"):
             print(f"{info.get('name', pid)}: unchanged (snapshot match), skipped")
             continue
         datasets.append(export_playlist(sp, pid, info=info))

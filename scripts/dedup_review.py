@@ -104,7 +104,9 @@ def main() -> None:
         for e in g["entries"]:
             info = uri_info.get(e["uri"]) or {}
             tid = info.get("id")
-            isrc = (cache.get(tid) or {}).get("isrc") if tid else None
+            # Market-aware exports carry isrc directly; the probe cache is the
+            # fallback for older exports.
+            isrc = info.get("isrc") or ((cache.get(tid) or {}).get("isrc") if tid else None)
             entries.append({**e, "duration_ms": info.get("duration_ms"), "isrc": isrc,
                             "rank": album_rank(e.get("album"))})
 

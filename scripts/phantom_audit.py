@@ -2,15 +2,14 @@
 re-delivered album versions Spotify has hidden from search and the artist
 profile. Read-only: produces a report, changes nothing.
 
-    cd spotify-mcp && uv run python ../scripts/phantom_audit.py <export-dir>
+    cd spotify-mcp && uv run python ../scripts/phantom_audit.py <export-dir> [--no-search]
 
-Two probe tiers, sized for the tiny dev-mode daily quota
-(docs/spotify-rate-limits.md):
-- Batch relink tier: /tracks?ids= (50 per request) with a market context —
-  Spotify relinks stale URIs and confesses via linked_from (definite signal).
-  Falls back to single-track fetches if batching is unavailable to this app.
-- Targeted ISRC search tier: search is the scarcest resource, so only tracks
-  implicated by dedup fuzzy groups get an isrc: search (invisibility signal).
+Market-aware exports carry everything the relink signal needs (probe-verified
+2026-07-29: playlist pages include external_ids.isrc, and relinked entries
+expose linked_from → export_playlists.py stores it as canonical_id). So the
+relink tier costs zero API calls — it reads exports. The only API tier left
+is the targeted `isrc:` search (catalog-visibility check) for tracks
+implicated by dedup fuzzy groups; --no-search skips it entirely.
 """
 
 from __future__ import annotations
@@ -29,7 +28,6 @@ from spotify_mcp import spotify_api
 # (docs/spotify-rate-limits.md) — stay under it.
 PACE_SECONDS = 1.0
 QUOTA_STOP_SECONDS = 300
-BATCH_SIZE = 50
 
 
 class QuotaExhausted(RuntimeError):
@@ -76,16 +74,6 @@ def load_exports(out_dir: Path) -> list[dict]:
     return playlists
 
 
-def parse_full_track(full: dict) -> dict:
-    return {
-        "fetched_id": full.get("id"),
-        "linked_from": (full.get("linked_from") or {}).get("id"),
-        "isrc": (full.get("external_ids") or {}).get("isrc"),
-        "playable": full.get("is_playable"),
-        "album": (full.get("album") or {}).get("name"),
-    }
-
-
 def isrc_search(sp, isrc: str) -> list[dict]:
     res = call(sp.search, f"isrc:{isrc}", type="track", limit=10, market="from_token")
     items = ((res or {}).get("tracks") or {}).get("items") or []
@@ -118,104 +106,75 @@ def fuzzy_suspects(out_dir: Path, playlists: list[dict]) -> set[str]:
 
 def main() -> None:
     out_dir = Path(sys.argv[1])
+    do_search = "--no-search" not in sys.argv[2:]
     playlists = load_exports(out_dir)
-    sp = spotify_api.Client().sp
-    # spotipy wires 429 into urllib3's Retry at __init__ (default_retry_codes)
-    # and urllib3 honors Retry-After by sleeping INSIDE the request — a giant
-    # header stalls the process for hours (observed: 46,649s). Zero the retry
-    # config and REBUILD the session so 429s surface to call() immediately;
-    # setting the attributes alone does nothing to the already-built adapter.
-    sp.retries = 0
-    sp.status_retries = 0
-    sp.status_forcelist = []
-    if hasattr(sp, "_build_session"):
-        sp._build_session()
 
     cache_path = out_dir / "phantom_cache.json"
     cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}
 
-    def checkpoint() -> None:
-        cache_path.write_text(json.dumps(cache, ensure_ascii=False))
+    tracks_by_id = {}
+    for pl in playlists:
+        for t in pl["tracks"]:
+            if t.get("id") and not t.get("is_local"):
+                tracks_by_id.setdefault(t["id"], t)
 
-    todo = [(pl, t) for pl in playlists for t in pl["tracks"] if t["id"] and not t["is_local"]]
-    todo_ids = list(dict.fromkeys(t["id"] for _pl, t in todo if t["id"] not in cache))
-
-    try:
-        batch_ok = True
-        for i in range(0, len(todo_ids), BATCH_SIZE):
-            chunk = todo_ids[i : i + BATCH_SIZE]
-            if batch_ok:
-                try:
-                    res = call(sp.tracks, chunk, market="from_token")
-                    for req_id, full in zip(chunk, (res or {}).get("tracks") or []):
-                        cache[req_id] = parse_full_track(full or {})
-                except QuotaExhausted:
-                    raise
-                except SpotifyException as e:
-                    print(f"batch fetch unavailable ({e.http_status}) — falling back to single fetches")
-                    batch_ok = False
-            if not batch_ok:
-                for tid in chunk:
-                    if tid in cache:
-                        continue
-                    try:
-                        cache[tid] = parse_full_track(call(sp.track, tid, market="from_token") or {})
-                    except QuotaExhausted:
-                        raise
-                    except Exception as err:  # noqa: BLE001 — rerun retries uncached tracks
-                        print(f"probe failed {tid}: {str(err)[:80]}")
-                    time.sleep(PACE_SECONDS)
-            if i % 500 < BATCH_SIZE:
-                print(f"relink tier {min(i + BATCH_SIZE, len(todo_ids))}/{len(todo_ids)}", flush=True)
-                checkpoint()
-            time.sleep(PACE_SECONDS)
+    searched = 0
+    if do_search:
+        sp = spotify_api.Client().sp
+        # spotipy wires 429 into urllib3's Retry at __init__ and urllib3
+        # honors Retry-After by sleeping INSIDE the request; rebuild the
+        # session with retries zeroed so 429s surface to call() immediately.
+        sp.retries = 0
+        sp.status_retries = 0
+        sp.status_forcelist = []
+        if hasattr(sp, "_build_session"):
+            sp._build_session()
 
         suspects = [tid for tid in sorted(fuzzy_suspects(out_dir, playlists))
-                    if (cache.get(tid) or {}).get("isrc") and cache[tid].get("isrc_hits") is None]
-        for n, tid in enumerate(suspects):
-            cache[tid]["isrc_hits"] = isrc_search(sp, cache[tid]["isrc"])
-            if (n + 1) % 25 == 0:
-                print(f"search tier {n + 1}/{len(suspects)}", flush=True)
-                checkpoint()
-            time.sleep(PACE_SECONDS)
-    except QuotaExhausted as e:
-        print(f"quota exhausted ({e}) — cache checkpointed, rerun after the window resets to resume")
-    checkpoint()
+                    if (tracks_by_id.get(tid) or {}).get("isrc")
+                    and (cache.get(tid) or {}).get("isrc_hits") is None]
+        try:
+            for n, tid in enumerate(suspects):
+                entry = cache.setdefault(tid, {})
+                entry["isrc"] = tracks_by_id[tid]["isrc"]
+                entry["isrc_hits"] = isrc_search(sp, entry["isrc"])
+                searched += 1
+                if (n + 1) % 25 == 0:
+                    print(f"search tier {n + 1}/{len(suspects)}", flush=True)
+                    cache_path.write_text(json.dumps(cache, ensure_ascii=False))
+                time.sleep(PACE_SECONDS)
+        except QuotaExhausted as e:
+            print(f"quota exhausted ({e}) — checkpointed after {searched} searches; rerun to resume")
+        cache_path.write_text(json.dumps(cache, ensure_ascii=False))
 
-    findings, no_isrc, errors = [], 0, 0
-    for pl, t in todo:
-        e = cache.get(t["id"]) or {}
-        if e.get("error"):
-            errors += 1
-            continue
-        verdict = canonical = None
-        # Relinked responses return the canonical track and put OUR id in linked_from.
-        if e.get("linked_from") == t["id"] and e.get("fetched_id") not in (None, t["id"]):
-            verdict = "relinked"
-            hits = e.get("isrc_hits") or []
-            canonical = next((h for h in hits if h["id"] == e["fetched_id"]),
-                             {"id": e["fetched_id"], "album": e.get("album"), "year": ""})
-        elif e and e.get("isrc") is None:
-            no_isrc += 1
-        else:
-            hits = e.get("isrc_hits")
-            if hits and t["id"] not in [h["id"] for h in hits]:
-                verdict = "isrc-invisible"
-                canonical = max(hits, key=lambda h: h.get("popularity") or 0)
-        if verdict:
-            findings.append(
-                {
-                    "playlist": pl["name"],
-                    "pos": t["pos"],
-                    "track": f"{', '.join(t['artists'])} – {t['name']}",
-                    "current_album": t["album"],
-                    "current_uri": t["uri"],
-                    "verdict": verdict,
-                    "canonical_id": canonical["id"],
-                    "canonical_album": canonical.get("album"),
-                    "canonical_year": canonical.get("year"),
-                }
-            )
+    findings = []
+    for pl in playlists:
+        for t in pl["tracks"]:
+            if not t.get("id") or t.get("is_local"):
+                continue
+            verdict = canonical = None
+            if t.get("canonical_id"):
+                verdict = "relinked"
+                canonical = {"id": t["canonical_id"], "album": None, "year": ""}
+            else:
+                hits = (cache.get(t["id"]) or {}).get("isrc_hits")
+                if hits and t["id"] not in [h["id"] for h in hits]:
+                    verdict = "isrc-invisible"
+                    canonical = max(hits, key=lambda h: h.get("popularity") or 0)
+            if verdict:
+                findings.append(
+                    {
+                        "playlist": pl["name"],
+                        "pos": t["pos"],
+                        "track": f"{', '.join(t['artists'])} – {t['name']}",
+                        "current_album": t["album"],
+                        "current_uri": t["uri"],
+                        "verdict": verdict,
+                        "canonical_id": canonical["id"],
+                        "canonical_album": canonical.get("album"),
+                        "canonical_year": canonical.get("year"),
+                    }
+                )
 
     (out_dir / "phantom_report.json").write_text(json.dumps(findings, ensure_ascii=False, indent=1))
     md = ["# Phantom URI report", "",
@@ -225,18 +184,17 @@ def main() -> None:
         rows = [f for f in findings if f["playlist"] == pl["name"]]
         md.append(f"## {pl['name']} — {len(rows)} phantom(s)")
         for f in rows:
-            md.append(
-                f"- pos {f['pos']}: {f['track']} — [{f['current_album']}] -> "
-                f"[{f['canonical_album']}, {f['canonical_year']}] ({f['verdict']})"
-            )
+            target = f["canonical_album"] or f["canonical_id"]
+            md.append(f"- pos {f['pos']}: {f['track']} — [{f['current_album']}] -> "
+                      f"[{target}{', ' + f['canonical_year'] if f['canonical_year'] else ''}] ({f['verdict']})")
         md.append("")
     (out_dir / "phantom_report.md").write_text("\n".join(md))
 
-    probed = sum(1 for _pl, t in todo if t["id"] in cache)
-    print(f"tracks probed: {probed}/{len(todo)}  phantoms: {len(findings)} "
+    unplayable = sum(1 for pl in playlists for t in pl["tracks"] if t.get("is_playable") is False)
+    print(f"tracks scanned: {len(tracks_by_id)}  phantoms: {len(findings)} "
           f"(relinked {sum(1 for f in findings if f['verdict'] == 'relinked')}, "
           f"isrc-invisible {sum(1 for f in findings if f['verdict'] == 'isrc-invisible')})  "
-          f"no-isrc: {no_isrc}  cached-errors: {errors}")
+          f"searches spent: {searched}  unplayable tracks: {unplayable}")
     print(f"report: {out_dir / 'phantom_report.md'}")
 
 
