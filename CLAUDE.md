@@ -91,18 +91,21 @@ landscape (Tidal = designated escape hatch):
 
 ## The curation operation (roster + stages)
 
-11 playlists + Liked Songs (~6.5k tracks). Alternative Rock folder — sisters:
-Ether (shoegaze, a bit of psych), Permanent Wave (Sonic Youth/Fugazi/Pixies
-canon), Dreamy (dreampop/slowcore), Dreamo (heavy gaze/slowcore hybrids);
-plus Alternative Rock (true reservoir), Garage Rock (pseudo-reservoir:
-Strokes/Arctic Monkeys/Interpol, inflated), Indie Rock (semi-thematic classic
-indie), Post-Punk (thematic). Outside the folder: Acoustic/Folk (acoustic
-reservoir), Rock (true reservoir), 70's Sunday Rock (half-formed 70s theme,
-~half still duplicated in Rock).
+APPLIED 2026-07-30 (plan v2, verified 18/18): 17 active playlists + Liked
+Songs (~6.5k). Thematic: Ether 68 (pure shoegaze), Permanent Wave 258
+(SY/Fugazi/Pixies canon; owner keeps it big — TFC and Yuck stay), Dreamy 201
+(dreampop/slowcore), Dreamo 27 (heavy-gaze), Post-Punk 202, Indie Rock 103
+(synth block kept under scene reading), Garage Rock 145 (2000s revival).
+Archetypes created: Psychedelia 130, Heartland & Americana 89, Chamber Indie
+60, 90s Alternative 53, Laurel Canyon 49, Britpop 40 (owner-nurtured, under
+floor by choice). Overlay: Third Eye 55 (copies, dedup-exempt). Open homes:
+Alternative Rock 101, Rock 109, Acoustic/Folk 76. Empty shell kept: 70's
+Sunday Rock.
 
-Stages, in order: 0) phantom-URI normalization incl. Liked Songs →
-1) thematic rebalance → 2) reservoir drain (one-way into thematic homes) →
-3) residue clustering → new-playlist proposals.
+Completed cycles: dedup pass (2026-07-23), full rebalance + drain + clustering
++ apply (2026-07-30). Next cycle lives in backlog issue #2 (Liked backfill +
+album-spam cleanup first; then Early Alternative, PW breakup, pockets) and
+issue #1 (Troi growth). Phantom/unplayable cleanup (203 tracks) parked.
 
 Every account write needs an explicitly owner-approved plan. Re-export before
 mutating — playlist state drifts. Live session state (exports, review files,
