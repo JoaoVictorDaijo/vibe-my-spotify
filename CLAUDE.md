@@ -102,16 +102,21 @@ APPLIED 2026-07-30 (plan v2, verified 18/18): 17 active playlists + Liked
 Songs (~6.5k). Thematic: Ether 68 (pure shoegaze), Permanent Wave 258
 (SY/Fugazi/Pixies canon; owner keeps it big — TFC and Yuck stay), Dreamy 201
 (dreampop/slowcore), Dreamo 27 (heavy-gaze), Post-Punk 202, Indie Rock 103
-(synth block kept under scene reading), Garage Rock 145 (2000s revival).
+(synth block kept under scene reading), Garage Rock 145 (2000s revival;
+renamed **Post-Punk Revival** 2026-07-30, Strokes' Angles/Comedown Machine
+tracks moved to Indie Rock under the owner's album-aware principle).
 Archetypes created: Psychedelia 130, Heartland & Americana 89, Chamber Indie
 60, 90s Alternative 53, Laurel Canyon 49, Britpop 40 (owner-nurtured, under
 floor by choice). Overlay: Third Eye 55 (copies, dedup-exempt). Open homes:
 Alternative Rock 101, Rock 109, Acoustic/Folk 76. Empty shell kept: 70's
 Sunday Rock. Joined post-apply (2026-07-30, owner request): New Wave /
-Synthwave 109 — a PRIMARY HOME for synth-flavored tracks, dirty at intake
-(9 cross-roster dups, 2 internal edition dups, off-theme strays; evidence in
-vibes/new-wave-synthwave.md); cleanup pass needs an approved plan and
-reopens Indie Rock's synth-block question.
+Synthwave 94 — a PRIMARY HOME for synth-flavored tracks, cleaned same day
+in two owner-ruled applied plans (dedup keepers, stray sweep, Julian
+Casablancas united there; Indie Rock kept its synth block minus
+Brothertiger). Full rulings: vibes/new-wave-synthwave.md. API quirk from
+the rename: `playlist_change_details` silently no-ops — use a raw
+`PUT playlists/{id}` with the full payload, and don't trust immediate GET
+read-backs of name/description (stale cache; verify in the app).
 
 Completed cycles: dedup pass (2026-07-23), full rebalance + drain + clustering
 + apply (2026-07-30). Next cycle lives in backlog issue #2 (Liked backfill +
