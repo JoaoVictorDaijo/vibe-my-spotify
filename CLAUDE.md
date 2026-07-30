@@ -53,16 +53,17 @@ fetches already return `external_ids.isrc` for dedup evidence. Alternatives
 landscape (Tidal = designated escape hatch):
 [docs/streaming-api-alternatives.md](docs/streaming-api-alternatives.md).
 
-## Model tiering (owner-approved; revised by the July 2026 operation)
+## Model tiering (owner-approved; final revision 2026-07-30 post-operation)
 
 - Scripts for all mechanics — never a model.
-- Sonnet for small, well-bounded judgment only. Large single-pass
-  classification (hundreds of tracks) goes to Opus directly — the real run
-  showed Sonnet degrading at drain scale (33% overturn, off-by-one reason
-  shifts; see [docs/operation-learnings.md](docs/operation-learnings.md)).
-- When Sonnet is used: Opus re-judges every verdict below high confidence.
-- Clustering, new-playlist proposals, and synthesis go to Opus; a Fable agent
-  checks/merges multi-agent findings on owner approval.
+- **Sonnet is deprecated for this project's judgment work** (drain-scale
+  failure modes documented in
+  [docs/operation-learnings.md](docs/operation-learnings.md)).
+- **Opus does all judgment**: classification, drains, clustering, proposals,
+  plan design, and adversarial review rounds.
+- **A single Fable agent is the standing final conciliator** — synthesizer /
+  advisor / reviewer merging multi-agent findings, arbitrating conflicts,
+  and checking the whole before anything reaches the owner.
 - Agents producing large verdict files must write incrementally (64k output
   ceiling) and return only counts as text.
 
@@ -116,6 +117,14 @@ issue #1 (Troi growth). Phantom/unplayable cleanup (203 tracks) parked.
 Every account write needs an explicitly owner-approved plan. Re-export before
 mutating — playlist state drifts. Live session state (exports, review files,
 applied vs parked) lives in the gitignored `curation-review/`.
+
+Durable state baseline: `curation-review/baseline/` holds the latest full
+export of every playlist (JSON + compact txt, plus liked-songs.json). Refresh
+it after every apply and diff future API pulls against it (the exporter's
+snapshot-skip works directly against this directory via `--out`). Scratchpad
+exports are working copies; the baseline is the source of truth between
+sessions. Roster counts above are as-verified at apply time — live state
+drifts with the owner's own listening; the baseline records reality.
 
 Liked Songs caveat: old Spotify auto-liked every track of a liked album, so
 the ~6.5k Liked pool contains album-spam — a liked track is NOT reliable
