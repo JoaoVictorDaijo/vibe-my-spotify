@@ -106,8 +106,10 @@ Songs (~6.5k). Thematic: Ether 68 (pure shoegaze), Permanent Wave 258
 renamed **Post-Punk Revival** 2026-07-30, Strokes' Angles/Comedown Machine
 tracks moved to Indie Rock under the owner's album-aware principle).
 Archetypes created: Psychedelia 130, Heartland & Americana 89, Chamber Indie
-60, 90s Alternative 53, Laurel Canyon 49, Britpop 40 (owner-nurtured, under
-floor by choice). Overlay: Third Eye 55 (copies, dedup-exempt). Open homes:
+60 (grown to 73 and renamed **Chamber Pop** 2026-07-31 — the theme is the
+owner's band graph, National/Arcade Fire/Beirut/Whitney axis; see its vibe
+file), 90s Alternative 53, Laurel Canyon 49, Britpop 40 (owner-nurtured,
+under floor by choice). Overlay: Third Eye 55 (copies, dedup-exempt). Open homes:
 Alternative Rock 101, Rock 109, Acoustic/Folk 76. Empty shell kept: 70's
 Sunday Rock. Joined post-apply (2026-07-30, owner request): New Wave /
 Synthwave 94 — a PRIMARY HOME for synth-flavored tracks, cleaned same day
@@ -121,7 +123,11 @@ read-backs of name/description (stale cache; verify in the app).
 Completed cycles: dedup pass (2026-07-23), full rebalance + drain + clustering
 + apply (2026-07-30), New Wave / Synthwave onboarding + Night Wave overlay
 (2026-07-30), PW trim 258 → 209 via two-Opus-judge convergence + owner
-toggles (2026-07-31; record in curation-review/pw-trim-proposal.md). Next
+toggles (2026-07-31; record in curation-review/pw-trim-proposal.md), Chamber
+Pop growth + rename (2026-07-31: Whitney ×8, band-graph theme, strays
+rehomed). The placement pipeline these cycles converged on is codified as
+the repo skill `.claude/skills/track-placement` — invoke it for any
+where-does-this-song-belong question. Next
 cycle lives in backlog issue #2 (Liked backfill + album-spam cleanup first;
 then Early Alternative, yacht/sophisti-pop seed, pockets) and issue #1 (Troi
 growth). Phantom/unplayable cleanup (203 tracks) parked. Owner doctrines
