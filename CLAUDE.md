@@ -119,9 +119,17 @@ the rename: `playlist_change_details` silently no-ops — use a raw
 read-backs of name/description (stale cache; verify in the app).
 
 Completed cycles: dedup pass (2026-07-23), full rebalance + drain + clustering
-+ apply (2026-07-30). Next cycle lives in backlog issue #2 (Liked backfill +
-album-spam cleanup first; then Early Alternative, PW breakup, pockets) and
-issue #1 (Troi growth). Phantom/unplayable cleanup (203 tracks) parked.
++ apply (2026-07-30), New Wave / Synthwave onboarding + Night Wave overlay
+(2026-07-30), PW trim 258 → 209 via two-Opus-judge convergence + owner
+toggles (2026-07-31; record in curation-review/pw-trim-proposal.md). Next
+cycle lives in backlog issue #2 (Liked backfill + album-spam cleanup first;
+then Early Alternative, yacht/sophisti-pop seed, pockets) and issue #1 (Troi
+growth). Phantom/unplayable cleanup (203 tracks) parked. Owner doctrines
+worth knowing before judging: Acoustic/Folk admits only special acoustic
+VERSIONS or folk-genre tracks (an originally-acoustic song stays with its
+genre archetype); Indie Rock tolerates hushed/slow songs by resident bands;
+scene bands classify album-aware (Strokes precedent), and for PW the test is
+sonic lineage (the Yuck gazey rule), not era.
 
 Every account write needs an explicitly owner-approved plan. Re-export before
 mutating — playlist state drifts. Live session state (exports, review files,
