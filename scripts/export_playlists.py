@@ -48,6 +48,10 @@ def _parse_items(items: list, offset: int) -> list[dict]:
                 "album": album.get("name"),
                 "year": (album.get("release_date") or "")[:4],
                 "duration_ms": t.get("duration_ms"),
+                # Liked spam-run detection and edition-fix dating both need
+                # the save/insert timestamp; present on saved-track and
+                # playlist items alike.
+                "added_at": item.get("added_at"),
                 "is_local": bool(item.get("is_local") or t.get("is_local")),
             }
         )

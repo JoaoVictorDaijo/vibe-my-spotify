@@ -96,6 +96,17 @@ landscape (Tidal = designated escape hatch):
 - Review files: every group carries a computed PROPOSED action; an unchecked
   checkbox executes it, a checked one overrides (flips) it — one uniform
   semantic across all sections.
+- **The curated roster is the edition authority** (2026-08-01): when the
+  same recording (ISRC-identical) exists as different editions in Liked vs
+  a playlist, Liked aligns to the roster's URI — never fork the roster's
+  choice. Delisted-edition "ghosts" are canonicalized against the artist
+  page (probe-validated: `artist_albums` + `album_tracks` alive; match by
+  title + duration ±2s, MusicBrainz ISRC for ties). Re-liking resets
+  `added_at` — the pre-fix dated Liked snapshot
+  (curation-review/liked-songs-dated-prefix-2026-08-01.json) is the
+  permanent reference for album-spam analysis. Every add-plan must check
+  destination ISRCs, not just URIs and titles, so edition dups can never
+  re-enter through the pipeline.
 
 ## The curation operation (roster + stages)
 

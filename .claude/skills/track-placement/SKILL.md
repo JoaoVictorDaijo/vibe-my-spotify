@@ -75,7 +75,9 @@ constraint set, not suggestions.
   affected playlists immediately before generating it.
 - Generate the plan with an evidence-checking script that REFUSES to emit
   on any failed check: source match unique, keeper-side verified live,
-  destination free of URI and fuzzy-title twins, forbidden-URI guards.
+  destination free of URI, fuzzy-title AND ISRC twins (an edition dup is
+  invisible to URI checks — the roster is the edition authority), forbidden-
+  URI guards.
 - Execute via `scripts/apply_plan_runner.py` (journaled, adds strictly
   before removals, phase-2.5 hard gate, drift = halt, any 429 = stop).
 - After verify: refresh the baseline for touched playlists, record the
