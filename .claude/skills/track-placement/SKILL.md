@@ -46,7 +46,10 @@ constraint set, not suggestions.
 3. **Sound-lineage override for sound-defined playlists**: where the
    playlist is a sound (PW's gazey rule for Yuck), the per-track sonic test
    beats the album split — the album is only a proxy.
-4. **Owner doctrines trump everything**: Acoustic/Folk's two admission
+4. **Owner doctrines trump everything**: unplayable rows are tombstones
+   — never removed/unliked for being dead, swapped only for an
+   ISRC-identical same-album republish, and never addable elsewhere (dead
+   URIs 400 the batch); Acoustic/Folk's two admission
    lanes (special acoustic VERSIONS or folk-genre — an originally-acoustic
    song stays with its genre archetype); Indie Rock tolerates hushed songs
    by resident bands; overlays hold copies and are dedup-exempt; a demo is

@@ -107,6 +107,14 @@ landscape (Tidal = designated escape hatch):
   permanent reference for album-spam analysis. Every add-plan must check
   destination ISRCs, not just URIs and titles, so edition dups can never
   re-enter through the pipeline.
+- **Tombstone doctrine (owner, 2026-08-01): unplayable rows are NEVER
+  removed or unliked for being dead** — they may be relisted someday. Swap
+  an unplayable only when an ISRC-identical version exists on a republish
+  of the same album; a truly-gone recording (e.g., a removed live album)
+  stays in place as a tombstone. (Tombstones still can't be ADDED anywhere
+  — dead URIs 400 the batch — so they keep their current homes.) The
+  playable-ghost evidence ladder (title + duration ±2s) applies only to
+  playable rows.
 
 ## The curation operation (roster + stages)
 
