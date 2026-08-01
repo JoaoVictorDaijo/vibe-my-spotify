@@ -79,7 +79,8 @@ landscape (Tidal = designated escape hatch):
   revisited only after the archetypes stabilize.
 - Two playlist types: archetypes are PRIMARY HOMES (tracks move there);
   blessed niche standalones may be OVERLAYS holding copies fetched from
-  primary homes without removing them (Third Eye is the model). Overlay
+  primary homes without removing them (Night Wave is the model; Third Eye
+  was, until its 2026-08-01 promotion to a standalone primary home). Overlay
   playlists are exempt from cross-playlist dedup — their copies are
   intentional. Overlays may also carry externally-suggested songs the owner
   adds manually.
@@ -109,7 +110,8 @@ Archetypes created: Psychedelia 130, Heartland & Americana 89, Chamber Indie
 60 (grown to 73 and renamed **Chamber Pop** 2026-07-31 — the theme is the
 owner's band graph, National/Arcade Fire/Beirut/Whitney axis; see its vibe
 file), 90s Alternative 53, Laurel Canyon 49, Britpop 40 (owner-nurtured,
-under floor by choice). Overlay: Third Eye 55 (copies, dedup-exempt). Open homes:
+under floor by choice). Overlay: Night Wave 18 (copies, dedup-exempt; Third Eye
+held this role until 2026-08-01). Open homes:
 Alternative Rock 101, Rock 109, Acoustic/Folk 76. Empty shell kept: 70's
 Sunday Rock. Joined post-apply (2026-07-30, owner request): New Wave /
 Synthwave 94 — a PRIMARY HOME for synth-flavored tracks, cleaned same day
@@ -118,14 +120,20 @@ Casablancas united there; Indie Rock kept its synth block minus
 Brothertiger). Full rulings: vibes/new-wave-synthwave.md. API quirk from
 the rename: `playlist_change_details` silently no-ops — use a raw
 `PUT playlists/{id}` with the full payload, and don't trust immediate GET
-read-backs of name/description (stale cache; verify in the app).
+read-backs of name/description (stale cache; verify in the app). Playlist
+adds reject dead URIs (unplayable, no relink) with a whole-batch 400 —
+filter phantoms out of every add list.
 
 Completed cycles: dedup pass (2026-07-23), full rebalance + drain + clustering
 + apply (2026-07-30), New Wave / Synthwave onboarding + Night Wave overlay
 (2026-07-30), PW trim 258 → 209 via two-Opus-judge convergence + owner
 toggles (2026-07-31; record in curation-review/pw-trim-proposal.md), Chamber
 Pop growth + rename (2026-07-31: Whitney ×8, band-graph theme, strays
-rehomed). The placement pipeline these cycles converged on is codified as
+rehomed), psych-space restructure (2026-08-01: Third Eye promoted to
+standalone primary home at 48 — revival-scene bands only, 80s ancestors
+returned to their scene homes; Psychedelia refocused to the modern core at
+84; First Wave 17 created for the 1966–74 classics, owner-nurtured under
+floor). The placement pipeline these cycles converged on is codified as
 the repo skill `.claude/skills/track-placement` — invoke it for any
 where-does-this-song-belong question. Next
 cycle lives in backlog issue #2 (Liked backfill + album-spam cleanup first;

@@ -88,4 +88,11 @@ Playlist rename: spotipy's `playlist_change_details` silently no-ops — use
 a raw `PUT playlists/{id}` with the full payload, and don't trust the
 immediate GET read-back (stale cache; verify in the app or via a later
 export). /search is dead (403) for this app: URIs come from exports, Liked,
-or the owner's other playlists.
+or the owner's other playlists. Adds reject dead URIs (unplayable AND no
+`canonical_id` relink) with a whole-batch 400 — filter phantoms from every
+add list. Plans that add to a playlist created in the same run must set
+`playlist_id_or_name` to the runner's `<created:Name>` placeholder — a
+literal name reaches the request URL and 400s as "Unsupported URL"; and a
+halted-after-create rerun on a fresh journal will create a duplicate
+(adoption only fires on an attempted-unknown create), so prefer resuming
+the same journal or targeting the created id directly.
