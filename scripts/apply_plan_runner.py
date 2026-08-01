@@ -67,6 +67,10 @@ PAGE = 100
 
 GATE_PHASE25 = "phase25_pass"
 
+# A drift check costs two reads: the playlist object carries snapshot_id but an empty
+# `tracks` dict, so the count comes from the items endpoint.
+SNAPSHOT_CHECK_CALLS = 2
+
 EXIT_OK = 0
 EXIT_MISMATCH = 1
 EXIT_QUOTA = 2
@@ -433,9 +437,21 @@ def fetch_uris(api: Api, playlist_id: str) -> list[str]:
             return uris
 
 
-def fetch_snapshot_total(api: Api, playlist_id: str) -> tuple[str | None, int | None]:
-    info = api.call("playlist", api.sp.playlist, playlist_id, fields="snapshot_id,tracks.total")
-    return (info or {}).get("snapshot_id"), ((info or {}).get("tracks") or {}).get("total")
+def fetch_snapshot(api: Api, playlist_id: str) -> str | None:
+    """The playlist's snapshot_id, or None if the field could not be read."""
+    info = api.call("playlist", api.sp.playlist, playlist_id, fields="snapshot_id")
+    return (info or {}).get("snapshot_id")
+
+
+def fetch_total(api: Api, playlist_id: str) -> int | None:
+    """The playlist's track count, or None if it could not be read.
+
+    The playlist object carries an empty `tracks` dict post-Feb-2026, so the count is
+    only available from the items endpoint; one item is enough to read the total.
+    """
+    page = api.call("playlist_items", api.sp.playlist_items, playlist_id,
+                    limit=1, offset=0, market="from_token")
+    return (page or {}).get("total")
 
 
 def _write_snapshot(api: Api, endpoint: str, fn, *args, **kwargs) -> str:
@@ -486,7 +502,8 @@ def dry_run(plan: dict) -> None:
         ops = [(seq, o) for seq, o in enumerate(plan["ops"]) if o["phase"] == phase]
         if not ops:
             continue
-        pcalls = sum(o.get("calls", 0) for _, o in ops)
+        pcalls = sum(SNAPSHOT_CHECK_CALLS if o["action"] == "snapshot_check" else o.get("calls", 0)
+                     for _, o in ops)
         calls += pcalls
         print(f"--- phase {phase}: {len(ops)} ops, {pcalls} call(s) ---")
         for seq, op in ops:
@@ -523,8 +540,15 @@ def phase0(api: Api, plan: dict, journal: Journal, resume: bool) -> None:
             continue
         name, pid = op["playlist_name"], op["playlist_id_or_name"]
         journal.attempt(seq, op, pid)
-        snap, total = fetch_snapshot_total(api, pid)
+        snap = fetch_snapshot(api, pid)
+        total = fetch_total(api, pid)
         journal.done(seq, ok=True, snapshot_id=snap, placeholder=True, detail=f"total={total}")
+        # An unreadable field is an API-shape problem, not an owner edit. Conflating the
+        # two would report every playlist as drifted and send the owner re-exporting.
+        if snap is None or total is None:
+            raise PlanHalt(
+                f"cannot read {name}: snapshot_id={snap!r} total={total!r}. This is a read "
+                "failure, not drift — check the API response shape before re-running.")
 
         # On a resume our own writes have already moved the snapshot and the count, so
         # the baseline is the export adjusted by what the journal says we did. An
@@ -550,7 +574,7 @@ def phase0(api: Api, plan: dict, journal: Journal, resume: bool) -> None:
             continue
 
         detail = _classify_drift(api, plan, journal, name, pid, total, expected_total, resume,
-                                 live=live)
+                                 live=live, snapshot_moved=snap != expected_snap)
         detail.update({"playlist": name, "playlist_id": pid,
                        "expected_snapshot_id": expected_snap, "live_snapshot_id": snap})
         drifted.append(detail)
@@ -608,13 +632,16 @@ def _unexplained_by_pending(plan: dict, journal: Journal, name: str, pid: str,
 
 def _classify_drift(api: Api, plan: dict, journal: Journal, name: str, pid: str,
                     total: int | None, expected_total: int, resume: bool,
-                    live: list[str] | None = None) -> dict:
+                    live: list[str] | None = None, snapshot_moved: bool = True) -> dict:
     """Describe how a playlist diverged, so the halt message is actionable.
 
-    Costs one paged read of an already-doomed run; the alternative is telling the owner
-    only that something changed.
+    Every reported class is one that was actually observed — a cause the run did not
+    detect must never appear in the message, or the owner chases the wrong signal.
+    Costs one paged read of an already-doomed run.
     """
-    classes = ["snapshot mismatch"]
+    classes = []
+    if snapshot_moved:
+        classes.append("snapshot mismatch")
     if total != expected_total:
         classes.append(f"count {total} vs expected {expected_total}")
     if live is None:
@@ -758,7 +785,9 @@ def phase25(api: Api, plan: dict, journal: Journal, created: dict[str, str],
         removed = len(journal.done_write_uris(pid, "remove_tracks"))
         expected = op["expected_total"] - removed
         journal.attempt(seq, op, pid)
-        _, total = fetch_snapshot_total(api, pid)
+        total = fetch_total(api, pid)
+        if total is None:
+            raise PlanHalt(f"cannot read {name}'s track count — read failure, not a gate failure")
         ok = total == expected
         journal.done(seq, ok=True, snapshot_id="n/a-read", placeholder=True,
                      detail=f"total={total} expected={expected}")

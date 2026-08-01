@@ -107,8 +107,23 @@ class FakeSpotify:
 
     # ---- reads ---- #
     def playlist(self, pid, fields=None):
+        """The Feb-2026 playlist object: `tracks` is present but empty.
+
+        No track count is reachable here under any `fields` expression, and the filter
+        returns only the requested paths that actually exist — asking for
+        `tracks.total` yields a response with no `tracks` key at all.
+        """
         self._maybe_fail("playlist", pid)
-        return {"snapshot_id": self.snap[pid], "tracks": {"total": len(self.store[pid])}}
+        full = {"id": pid, "name": self.names[pid], "snapshot_id": self.snap[pid],
+                "owner": {"id": self.owners[pid]}, "tracks": {}}
+        if fields is None:
+            return full
+        out = {}
+        for path in fields.split(","):
+            head = path.strip().split(".")[0]
+            if head in full and full[head] not in ({}, None):
+                out[head] = full[head]
+        return out
 
     def playlist_items(self, pid, limit=100, offset=0, market=None):
         self._maybe_fail("playlist_items", pid)
@@ -551,6 +566,68 @@ def test_pending_write_that_landed_is_still_explained():
               named_store(sp) == make_plan()["expected_end_state"], str(named_store(sp)))
 
 
+def test_playlist_object_carries_no_track_count():
+    """The old `playlist(...)["tracks"]["total"]` read is unavailable, by any route."""
+    tmp, path, sp = fresh()
+    with tmp:
+        full = sp.playlist("PL_SRC")
+        check("api shape: the playlist object's tracks dict is empty",
+              full["tracks"] == {}, str(full))
+        check("api shape: reading a count from the playlist object yields nothing",
+              (full.get("tracks") or {}).get("total") is None)
+        filtered = sp.playlist("PL_SRC", fields="snapshot_id,tracks.total")
+        check("api shape: a fields filter omits tracks entirely",
+              "tracks" not in filtered and filtered["snapshot_id"] == sp.snap["PL_SRC"],
+              str(filtered))
+        check("api shape: the items endpoint is the only source of the count",
+              sp.playlist_items("PL_SRC", limit=1)["total"] == len(sp.store["PL_SRC"]))
+        check("runner reads the snapshot from the playlist object",
+              runner.fetch_snapshot(runner.Api(path / "c.json", sp=sp), "PL_SRC")
+              == sp.snap["PL_SRC"])
+        check("runner reads the count from the items endpoint",
+              runner.fetch_total(runner.Api(path / "c.json", sp=sp), "PL_SRC")
+              == len(sp.store["PL_SRC"]))
+
+
+def test_unreadable_field_is_an_error_not_drift():
+    """A field the API stops serving must never be reported as an owner edit."""
+    class NoSnapshot(FakeSpotify):
+        def playlist(self, pid, fields=None):
+            self._maybe_fail("playlist", pid)
+            return {}
+
+    class NoTotal(FakeSpotify):
+        def playlist_items(self, pid, limit=100, offset=0, market=None):
+            page = super().playlist_items(pid, limit, offset, market)
+            page.pop("total")
+            return page
+
+    for label, cls in (("snapshot", NoSnapshot), ("count", NoTotal)):
+        tmp = TemporaryDirectory()
+        with tmp:
+            path, sp = Path(tmp.name), cls(EXISTING)
+            code, out = run_plan(path, sp)
+            check(f"unreadable {label}: halts as an error, not drift",
+                  code == runner.EXIT_HALT, f"exit {code} {out[-300:]}")
+            check(f"unreadable {label}: says read failure, not drift",
+                  "read failure, not drift" in out or "read failure" in out, out[-300:])
+            check(f"unreadable {label}: does not tell the owner to re-export",
+                  "re-export and regenerate the plan" not in out, out[-300:])
+            check(f"unreadable {label}: issues no writes", sp.writes() == [], str(sp.writes()))
+
+
+def test_drift_message_reports_only_observed_causes():
+    """A cause the run did not observe must not appear — it sends the owner hunting."""
+    tmp, path, sp = fresh()
+    with tmp:
+        sp.store["PL_SRC"].append("spotify:track:zzzNEW")   # count moves, snapshot does not
+        code, out = run_plan(path, sp)
+        check("drift message: a count-only divergence is reported as such",
+              code == runner.EXIT_DRIFT and "count 12 vs expected 11" in out, out[-300:])
+        check("drift message: does not claim a snapshot mismatch that did not happen",
+              "snapshot mismatch" not in out, out[-400:])
+
+
 def test_phase3_gate_refuses_without_phase25():
     tmp, path, sp = fresh()
     with tmp:
@@ -657,10 +734,11 @@ def test_resume_mid_phase3():
 
 def test_429_on_every_path():
     cases = {
-        "phase 0 read": ("playlist", {}),
+        "phase 0 snapshot read": ("playlist", {}),
+        "phase 0 count read": ("playlist_items", {}),
         "phase 1 write": ("create_playlist", {"phase": 1}),
         "phase 2 write": ("add_tracks", {"phase": 2}),
-        "phase 2.5 read": ("playlist", {"phase": 2.5}),
+        "phase 2.5 count read": ("playlist_items", {"phase": 2.5}),
         "phase 3 write": ("remove_tracks", {"phase": 3}),
         "phase 4 read": ("playlist_items", {"phase": 4}),
     }
