@@ -106,7 +106,10 @@ landscape (Tidal = designated escape hatch):
   (curation-review/liked-songs-dated-prefix-2026-08-01.json) is the
   permanent reference for album-spam analysis. Every add-plan must check
   destination ISRCs, not just URIs and titles, so edition dups can never
-  re-enter through the pipeline.
+  re-enter through the pipeline. Ghost→canonical mappings live permanently
+  in `curation-review/uri-remaps.json` (discovered vs applied, with
+  fixed_in) — consult before any discovery, update after any fix, so
+  Liked-side and playlist-side repairs share one memory.
 - **Tombstone doctrine (owner, 2026-08-01): unplayable rows are NEVER
   removed or unliked for being dead** — they may be relisted someday. Swap
   an unplayable only when an ISRC-identical version exists on a republish

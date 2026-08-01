@@ -76,6 +76,11 @@ constraint set, not suggestions.
 
 - Every account write needs an explicitly owner-approved plan; re-export
   affected playlists immediately before generating it.
+- Consult `curation-review/uri-remaps.json` FIRST: known ghost URIs are
+  never added and never re-discovered — translate ghost → canonical via
+  the registry; record every new discovery and every applied fix back
+  into it (status + fixed_in), so Liked-side and playlist-side fixes
+  find each other across sessions.
 - Generate the plan with an evidence-checking script that REFUSES to emit
   on any failed check: source match unique, keeper-side verified live,
   destination free of URI, fuzzy-title AND ISRC twins (an edition dup is
