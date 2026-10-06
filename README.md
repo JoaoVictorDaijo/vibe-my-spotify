@@ -75,10 +75,16 @@ re-add songs, edition dups breed. The toolkit:
 ### Token & API economy
 - Mechanical work is plain scripts — never a model. Models only judge.
 - Judgment reads compact `pos | artist – title` exports, not raw API JSON.
-- The Feb-2026 API reality (dead /search, dead batch GETs, daily quotas,
-  429 discipline) is mapped in [docs/spotify-rate-limits.md](docs/spotify-rate-limits.md)
-  and survived by probe-first habits; recording identity falls back to
-  MusicBrainz. Alternatives landscape:
+- One API discipline for every script: requests go through the runner's
+  `Api` wrapper (one per 2 s, a shared daily call ledger), and each 429 is
+  classified. Spotify's `QUOTA_EXCEEDED` reason, a missing or long
+  Retry-After means stop for the day; a short Retry-After means wait and
+  continue.
+- The Feb-2026 API reality (dead /search, daily quotas shared per developer
+  account, edition republishing) is mapped in
+  [docs/spotify-rate-limits.md](docs/spotify-rate-limits.md) and survived by
+  probe-first habits; recording identity falls back to MusicBrainz.
+  Alternatives landscape:
   [docs/streaming-api-alternatives.md](docs/streaming-api-alternatives.md).
 - Hard-won multi-agent process lessons:
   [docs/operation-learnings.md](docs/operation-learnings.md).
@@ -88,10 +94,10 @@ re-add songs, edition dups breed. The toolkit:
 | Path | What |
 |---|---|
 | [CLAUDE.md](CLAUDE.md) | The operating guide: policies, doctrines, roster, API notes — auto-loaded every session |
-| [scripts/](scripts/) | Zero-token mechanics: export, dedup, diff, enrich, phantom audit, the journaled apply runner + its test suite |
+| [scripts/](scripts/) | Zero-token mechanics: export, dedup, diff, enrich, phantom audit, two-judge verdict convergence, the journaled apply runner + its test suite |
 | [.claude/skills/track-placement](.claude/skills/track-placement/SKILL.md) | The placement pipeline as a reusable skill |
 | [docs/](docs/) | Rate-limit playbook, alternatives landscape, operation learnings |
-| [spotify-mcp/](spotify-mcp/) | Vendored MCP server (patched; see [VENDORED.md](spotify-mcp/VENDORED.md)) |
+| [spotify-mcp/](spotify-mcp/) | Vendored MCP server: upstream v0.7.0 + one local patch (see [VENDORED.md](spotify-mcp/VENDORED.md)) |
 | `curation-review/` | Gitignored: baselines, vibes, verdicts, registries — personal listening data stays local |
 
 ## Requirements
@@ -114,6 +120,9 @@ re-add songs, edition dups breed. The toolkit:
    ```
    ./auth.sh
    ```
+
+   Re-run it whenever the scope list changes (for example after updating the
+   vendored server): a cached token never gains new scopes on its own.
 
 3. Open the project in Claude Code and approve the `spotify` MCP server when prompted ([.mcp.json](.mcp.json) registers it; [run-server.sh](run-server.sh) launches it).
 

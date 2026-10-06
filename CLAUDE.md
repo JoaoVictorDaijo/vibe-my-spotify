@@ -5,6 +5,12 @@ MCP server in [spotify-mcp/](spotify-mcp/) and the zero-token scripts in
 [scripts/](scripts/). The policies below were agreed with the owner — follow
 them, and when a policy changes update this file rather than ad-hoc memory.
 
+The vendored server tracks upstream jamiew/spotify-mcp **v0.7.0** plus one
+local patch ([spotify-mcp/VENDORED.md](spotify-mcp/VENDORED.md)). The scripts
+use only its authenticated client. Account writes never go through MCP tools,
+only through the journaled apply runner. Any scope change invalidates the
+token: re-run `./auth.sh` once.
+
 ## Core principle: LLM tokens only where judgment lives
 
 Mechanical work (export, dedup detection, enrichment, phantom-URI audit,
@@ -29,22 +35,41 @@ server's spotipy client and token cache:
   (always pass `--skip-genres`: dev-mode apps get empty artist genres)
 - `phantom_audit.py DIR` — read-only stale-URI detection (ISRC + relinking)
 - `dedup_review.py DIR OUT.md` — checkbox review file from dedup + ISRC evidence
+- `verdict_convergence.py A.txt B.txt OUT_PREFIX [--field verdict|fallback]` —
+  joins two independent judges' verdict files (local, no API): agreements
+  become defaults, crossings become owner toggles
+- `apply_plan_runner.py PLAN --journal J` — executes an owner-approved plan
+
+Every Spotify call in these scripts goes through `apply_plan_runner.Api`:
+one request per 2 s, 429s classified per the rule below, and a shared daily
+per-endpoint ledger in `curation-review/apply_run_counters.json`. A full
+Liked export therefore takes ~4.5 minutes.
 
 Feb 2026 API notes: playlist items nest the track under `"item"`; batch GET
-endpoints are gone (403); **/search is 403-forbidden for this app entirely**
+endpoints are gone (403, re-probed 2026-10-06 on `/tracks?ids=`); **/search is 403-forbidden for this app entirely**
 (both plain and `isrc:` queries — probe-verified 2026-07-29), so the MCP
 search tool and any search-based flow are dead: adds need URIs from exports
 or external sources. Playlist pages fetched with `market="from_token"` carry
 `external_ids.isrc`, `is_playable`, and relink via `linked_from` — the
-cheapest per-track data that exists (100/request). Rate limits are
+cheapest per-track data that exists (100/request). Liked-membership checks: spotipy's
+`current_user_saved_tracks_contains` now hits `/me/library/contains?uris=` —
+alive at 40 ids per call (probe-verified 2026-10-06; 50 ids 400s). It
+answers by URI only, so resolve through `uri-remaps.json`/ISRC first —
+a re-liked song on a republished edition reads as "not liked" under its
+old URI (the Slanted & Enchanted lesson). Rate limits are
 unpublished — full picture in
 [docs/spotify-rate-limits.md](docs/spotify-rate-limits.md). Operating rules:
-serialize requests at ≤1 req/s; daily quotas exist (staff-confirmed) — treat
-each day as a budget: per-track GETs ≈350-600/day measured (our 13h penalty
-came from ~350 track GETs, not search — searches were 403ing all along);
-chunk writes at ≤40 items; cache every probe result permanently; on ANY 429
-stop the whole app, and a 429 without Retry-After means the day's budget is
-gone. Extended quota mode is business-only (≥250k MAU; "AI/ML" is a
+one request per 2 s (sustained ~1 req/s is this app's throttle edge); daily
+quotas exist and, since Spotify's 2026-07-23 update, are counted per
+developer account (every app on the account shares one pool) — treat each
+day as a budget: per-track GETs ≈350-600/day measured (our 13h penalty came
+from ~350 track GETs, not search — searches were 403ing all along); chunk
+writes at ≤40 items; cache every probe result permanently. **Classify every
+429 (owner-approved 2026-10-06):** `reason: QUOTA_EXCEEDED`, no
+Retry-After, or a wait over 300 s = the quota is spent, stop the whole app
+for the day; a short Retry-After = a rolling-window throttle, sleep it out
+and continue. spotipy's log line "Retry will occur after: 0 s" cannot tell
+the two apart. Extended quota mode is business-only (≥250k MAU; "AI/ML" is a
 documented rejection reason) — design inside dev mode. Judgment stages run
 off exports on disk and need no API — a penalty only blocks audits and
 applies, not analysis. For recording-identity questions prefer MusicBrainz
@@ -91,8 +116,9 @@ landscape (Tidal = designated escape hatch):
   probable; clearly different length = different recordings, keep both.
 - Keep order when collapsing copies: Deluxe/Extended > original album >
   compilation/Best-of. The same ranking picks canonical URIs for phantom swaps.
-- Acoustic versions in Acoustic/Folk duplicating an electric original elsewhere
-  are intentional parallel curation, not dupes.
+- Acoustic versions in Acoustic/Folk (approved to become **Unplugged**)
+  duplicating an electric original elsewhere are intentional parallel
+  curation, not dupes.
 - Review files: every group carries a computed PROPOSED action; an unchecked
   checkbox executes it, a checked one overrides (flips) it — one uniform
   semantic across all sections.
@@ -155,12 +181,21 @@ rehomed), psych-space restructure (2026-08-01: Third Eye promoted to
 standalone primary home at 48 — revival-scene bands only, 80s ancestors
 returned to their scene homes; Psychedelia refocused to the modern core at
 84; First Wave 17 created for the 1966–74 classics, owner-nurtured under
-floor). The placement pipeline these cycles converged on is codified as
-the repo skill `.claude/skills/track-placement` — invoke it for any
-where-does-this-song-belong question. Next
-cycle lives in backlog issue #2 (Liked backfill + album-spam cleanup first;
-then Early Alternative, yacht/sophisti-pop seed, pockets) and issue #1 (Troi
-growth). Phantom/unplayable cleanup (203 tracks) parked. Owner doctrines
+floor), Dreamy split (2026-08-26: the slowcore half became the standalone
+**Slowcore** playlist, 46, owner-nurtured; Dreamy is the pure dreampop half;
+no "bridge" category — every row coalesces into a defined bin). The
+placement pipeline these cycles converged on is codified as the repo skill
+`.claude/skills/track-placement` — invoke it for any
+where-does-this-song-belong question.
+
+In flight (state in `curation-review/STATUS.md`): the Liked backfill is
+judged (two rounds, ~1.2k proposed adds) but its apply is held while the
+owner reviews album-likes; Acoustic/Folk is approved to split (2026-10-06):
+a new **Folk** playlist (folk canon + indie folk + acoustic blues) and the
+current playlist renamed **Unplugged** (acoustic versions and covers); a
+Yacht Rock playlist is drafted (`curation-review/yacht/DRAFT.md`). Backlog
+lives in GitHub issues (#2 umbrella, #1 Troi growth, #3–#9).
+Phantom/unplayable cleanup (203 tracks) parked. Owner doctrines
 worth knowing before judging: Acoustic/Folk admits only special acoustic
 VERSIONS or folk-genre tracks (an originally-acoustic song stays with its
 genre archetype); Indie Rock tolerates hushed/slow songs by resident bands;
@@ -191,8 +226,10 @@ canonical per playlist.
 Liked Songs caveat: old Spotify auto-liked every track of a liked album, so
 the ~6.5k Liked pool contains album-spam — a liked track is NOT reliable
 evidence of curated affection. Any Liked-driven pass (backfill, suggestions)
-must weigh this; cleanup idea parked in backlog issue #2 (needs added_at in
-the export to detect same-album timestamp runs).
+must weigh this. The rule (owner, 2026-09-05): an album counts as a
+whole-album like when liked tracks / album tracks ≥ 75% (albums of ≥5
+tracks); a like-burst below that is curation. Exports carry `added_at`,
+`album_id` and `album_total_tracks` for this.
 
 ## Data hygiene — the repo is public
 

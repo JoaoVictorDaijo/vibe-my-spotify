@@ -65,7 +65,8 @@ constraint set, not suggestions.
 - **Contested or bulk decisions**: two INDEPENDENT Opus judges with an
   identical written mandate (locked owner rulings as constraints, open
   questions enumerated, output shape fixed, incremental file writes,
-  counts-only final text) → conciliator synthesis: convergent verdicts
+  counts-only final text) → join the two files mechanically with
+  `scripts/verdict_convergence.py` → conciliator synthesis: convergent verdicts
   become defaults, crossed verdicts go to the owner as toggles, each
   judge's un-seconded extras die unless doctrine-backed.
 - **Every verdict claim is unverified until checked against the data** —
@@ -87,7 +88,9 @@ constraint set, not suggestions.
   invisible to URI checks — the roster is the edition authority), forbidden-
   URI guards.
 - Execute via `scripts/apply_plan_runner.py` (journaled, adds strictly
-  before removals, phase-2.5 hard gate, drift = halt, any 429 = stop).
+  before removals, phase-2.5 hard gate, drift = halt; a quota 429 —
+  `QUOTA_EXCEEDED`, no or long Retry-After — stops the run, a short
+  Retry-After is slept out).
 - After verify: refresh the baseline for touched playlists, record the
   rulings in the vibe files (arrivals, departures, new doctrines), archive
   plan + journal + verdicts in `curation-review/`.
