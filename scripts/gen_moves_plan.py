@@ -15,6 +15,7 @@ Spec (JSON):
     {"config_id": "...", "status": "owner-approved: ...",
      "exports": "DIR",              # fresh playlist exports + liked-songs.json
      "registry": "uri-remaps.json", # optional
+     "metadata": ["old-export.json"], # optional: track rows only, never playlists
      "create":  [{"name": "Folk", "description": "...", "public": true}],
      "moves":   [{"uri": "...", "from": "Acoustic/Folk", "to": "Folk"}],
      "adds":    [{"uri": "...", "to": "Folk"}],          # e.g. from Liked
@@ -68,6 +69,9 @@ def load_exports(d: Path) -> tuple[dict[str, dict], dict[str, dict]]:
 def build(spec: dict) -> tuple[dict | None, list[str]]:
     errors: list[str] = []
     playlists, rows = load_exports(Path(spec["exports"]))
+    for path in spec.get("metadata", []):
+        for t in json.loads(Path(path).read_text())["tracks"]:
+            rows.setdefault(t["uri"], t)
     created = {c["name"]: c for c in spec.get("create", [])}
     ghosts = set()
     if spec.get("registry") and Path(spec["registry"]).exists():
