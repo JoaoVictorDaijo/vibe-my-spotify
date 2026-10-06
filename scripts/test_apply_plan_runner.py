@@ -53,10 +53,11 @@ runner = load_runner()
 # --------------------------------------------------------------------------- #
 
 class FakeSpotifyException(Exception):
-    def __init__(self, http_status, headers=None):
+    def __init__(self, http_status, headers=None, reason=None):
         super().__init__(f"fake {http_status}")
         self.http_status = http_status
         self.headers = headers or {}
+        self.reason = reason
 
 
 class FakeRetryError(Exception):
@@ -762,6 +763,29 @@ def test_429_short_retry_after_sleeps_and_continues():
         sp.fail_once("add_tracks", FakeSpotifyException(429, {"Retry-After": "5"}))
         code, out = run_plan(path, sp)
         check("429 with a short Retry-After sleeps then succeeds",
+              code == 0 and "sleeping" in out, f"exit {code} {out[-200:]}")
+
+
+def test_429_quota_reason_beats_short_retry_after():
+    # Load-bearing: a short Retry-After alone would make the runner sleep and
+    # retry; only the reason check stops it from draining the shared pool.
+    tmp, path, sp = fresh()
+    with tmp:
+        sp.fail_once("add_tracks", FakeSpotifyException(
+            429, {"Retry-After": "5"}, reason="QUOTA_EXCEEDED"))
+        code, out = run_plan(path, sp)
+        check("429 reason QUOTA_EXCEEDED ends the day even with a short Retry-After",
+              code == runner.EXIT_QUOTA and "QUOTA_EXCEEDED" in out and "sleeping" not in out,
+              f"exit {code} {out[-200:]}")
+
+
+def test_429_other_reason_with_short_retry_after_sleeps():
+    tmp, path, sp = fresh()
+    with tmp:
+        sp.fail_once("add_tracks", FakeSpotifyException(
+            429, {"Retry-After": "5"}, reason="RATE_LIMITED"))
+        code, out = run_plan(path, sp)
+        check("429 with a non-quota reason and short Retry-After sleeps then succeeds",
               code == 0 and "sleeping" in out, f"exit {code} {out[-200:]}")
 
 

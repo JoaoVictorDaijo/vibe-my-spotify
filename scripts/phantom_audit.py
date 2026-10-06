@@ -16,50 +16,11 @@ from __future__ import annotations
 
 import json
 import sys
-import time
 from pathlib import Path
 
-import requests
-from spotipy.exceptions import SpotifyException
+from apply_plan_runner import Api, PlanHalt, QuotaExhausted
 
-from spotify_mcp import spotify_api
-
-# Post-Feb-2026 dev-mode apps 429 at sustained rates near 1 req/s
-# (docs/spotify-rate-limits.md) — stay under it.
-PACE_SECONDS = 1.0
-QUOTA_STOP_SECONDS = 300
-
-
-class QuotaExhausted(RuntimeError):
-    pass
-
-
-def call(fn, *args, **kwargs):
-    for _ in range(5):
-        try:
-            return fn(*args, **kwargs)
-        except requests.exceptions.RetryError as e:
-            # Surfaces only if spotipy's internal retry layer was left active
-            # (session not rebuilt) — the 429 response is gone at this point.
-            raise QuotaExhausted("internal retries exhausted on 429") from e
-        except SpotifyException as e:
-            if e.http_status == 429:
-                headers = getattr(e, "headers", None) or {}
-                # HTTP/2 lowercases header names; don't miss it on case.
-                header = next((v for k, v in headers.items() if k.lower() == "retry-after"), None)
-                if header is None:
-                    # Community consensus: a 429 without Retry-After means the
-                    # daily quota is gone; probing further extends penalties.
-                    raise QuotaExhausted("429 with no Retry-After header")
-                retry_after = int(header)
-                if retry_after > QUOTA_STOP_SECONDS:
-                    raise QuotaExhausted(f"Retry-After {retry_after}s — daily quota exhausted")
-                time.sleep(retry_after)
-            elif e.http_status in (500, 502, 503):
-                time.sleep(2)
-            else:
-                raise
-    raise RuntimeError("rate-limited beyond patience")
+DEFAULT_COUNTERS = Path(__file__).resolve().parent.parent / "curation-review" / "apply_run_counters.json"
 
 
 def load_exports(out_dir: Path) -> list[dict]:
@@ -74,8 +35,8 @@ def load_exports(out_dir: Path) -> list[dict]:
     return playlists
 
 
-def isrc_search(sp, isrc: str) -> list[dict]:
-    res = call(sp.search, f"isrc:{isrc}", type="track", limit=10, market="from_token")
+def isrc_search(api: Api, isrc: str) -> list[dict]:
+    res = api.call("search", api.sp.search, f"isrc:{isrc}", type="track", limit=10, market="from_token")
     items = ((res or {}).get("tracks") or {}).get("items") or []
     return [
         {
@@ -120,15 +81,7 @@ def main() -> None:
 
     searched = 0
     if do_search:
-        sp = spotify_api.Client().sp
-        # spotipy wires 429 into urllib3's Retry at __init__ and urllib3
-        # honors Retry-After by sleeping INSIDE the request; rebuild the
-        # session with retries zeroed so 429s surface to call() immediately.
-        sp.retries = 0
-        sp.status_retries = 0
-        sp.status_forcelist = []
-        if hasattr(sp, "_build_session"):
-            sp._build_session()
+        api = Api(DEFAULT_COUNTERS)
 
         suspects = [tid for tid in sorted(fuzzy_suspects(out_dir, playlists))
                     if (tracks_by_id.get(tid) or {}).get("isrc")
@@ -137,16 +90,15 @@ def main() -> None:
             for n, tid in enumerate(suspects):
                 entry = cache.setdefault(tid, {})
                 entry["isrc"] = tracks_by_id[tid]["isrc"]
-                entry["isrc_hits"] = isrc_search(sp, entry["isrc"])
+                entry["isrc_hits"] = isrc_search(api, entry["isrc"])
                 searched += 1
                 if (n + 1) % 25 == 0:
                     print(f"search tier {n + 1}/{len(suspects)}", flush=True)
                     cache_path.write_text(json.dumps(cache, ensure_ascii=False))
-                time.sleep(PACE_SECONDS)
         except QuotaExhausted as e:
             print(f"quota exhausted ({e}) — checkpointed after {searched} searches; rerun to resume")
-        except SpotifyException as e:
-            if e.http_status == 403:
+        except PlanHalt as e:
+            if getattr(e.__cause__, "http_status", None) == 403:
                 # Feb-2026 dev-mode apps lost /search entirely — the
                 # visibility tier cannot run; relink + unplayable stand alone.
                 print("search is 403-forbidden for this app — visibility tier unavailable")

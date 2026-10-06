@@ -20,7 +20,9 @@ Safety model (see the plan's apply_plan.md):
   * every call gets an `attempt` journal record before it and a `done` record only
     after a verified-successful response, so a failed call can never be mistaken for a
     completed one on resume;
-  * any 429 halts the whole run (docs/spotify-rate-limits.md rule 5).
+  * a quota 429 (reason QUOTA_EXCEEDED, no wait hint, or a long wait) halts the
+    whole run; a rate-limit 429 with a short Retry-After sleeps and continues
+    (docs/spotify-rate-limits.md).
 
 Exit codes: 0 clean · 1 phase-4 mismatch · 2 quota exhausted · 3 halted precondition ·
 4 drift detected (re-export and regenerate).
@@ -61,6 +63,7 @@ def _load_spotify():
 # (docs/spotify-rate-limits.md).
 PACE_SECONDS = 2.0
 QUOTA_STOP_SECONDS = 300
+QUOTA_REASON = "QUOTA_EXCEEDED"  # error.reason on quota 429s (Spotify blog 2026-07-23)
 PHASE4_COOLDOWN_SECONDS = 60
 TRANSIENT_STATUS = (500, 502, 503, 504)
 PAGE = 100
@@ -390,10 +393,15 @@ class Api:
                     raise
                 status = getattr(exc, "http_status", None)
                 if status == 429:
+                    # Spotify marks quota exhaustion with this reason, and the quota
+                    # is one pool per developer account — retrying spends it for
+                    # every app, whatever Retry-After says.
+                    if getattr(exc, "reason", None) == QUOTA_REASON:
+                        raise QuotaExhausted(f"429 reason {QUOTA_REASON} — developer quota spent")
                     retry_after = _retry_after_seconds(exc)
                     if retry_after is None:
-                        # Community consensus: a 429 without a usable Retry-After means
-                        # the daily quota is gone; probing further risks extending it.
+                        # Unclassified 429 (no reason, no wait hint): treated as a spent
+                        # quota, since probing further risks extending a penalty.
                         raise QuotaExhausted("429 with no usable Retry-After header — day over")
                     if retry_after > QUOTA_STOP_SECONDS:
                         raise QuotaExhausted(f"Retry-After {retry_after}s — daily quota exhausted")

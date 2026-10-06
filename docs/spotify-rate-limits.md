@@ -17,6 +17,14 @@ dated; the Feb 2026 API overhaul obsoleted most older figures.
   required, ONE dev-mode client-ID per developer, max 5 users, reduced
   endpoint set. Rationale cites automation and AI risks.
   <https://developer.spotify.com/blog/2026-02-06-update-on-developer-access-and-platform-security>
+- **Quota model update (official blog, 2026-07-23):** up to 25 dev-mode
+  client IDs per developer account, and "the quota is counted per developer
+  account": every one of your apps draws from ONE shared pool. A quota hit
+  is a 429 whose JSON body carries `"reason": "QUOTA_EXCEEDED"`, so Spotify
+  now gives an official way to "distinguish quota limits from rate limits".
+  This replaces the community heuristic "no Retry-After = quota gone". Still
+  unpublished: the numbers, the window, and Retry-After behaviour.
+  <https://developer.spotify.com/blog/2026-07-23-web-api-quota-updates>
 - **Extended quota is business-only (since 2025-05-15):** registered business,
   launched commercial service, ≥250k MAU. "AI/ML use of Spotify content" is a
   documented rejection reason. No indie path.
@@ -67,7 +75,9 @@ dated; the Feb 2026 API overhaul obsoleted most older figures.
 
 ## Operating rules for this app
 
-1. Serialize all requests; ≤1 req/s sustained.
+1. Serialize all requests at one per 2 s. Every script routes through
+   `scripts/apply_plan_runner.Api`, which enforces the pace and the 429
+   policy below. Sustained ~1 req/s is this app's measured throttle edge.
 2. Treat each day as a budget. Search: a few hundred calls/day, spread out,
    never bursted; cache every result permanently (each ISRC searched at most
    once, ever — phantom_cache.json).
@@ -78,11 +88,17 @@ dated; the Feb 2026 API overhaul obsoleted most older figures.
    ≈600/day on `/v1/tracks`) — but first check whether the playlist/liked
    page payload already carries the field (e.g. `external_ids.isrc`,
    `linked_from` with a market context) before spending per-track calls.
-5. On ANY 429: stop the entire app, not just the endpoint. Never probe
-   during a penalty. A 429 without `Retry-After` = quota exhausted, halt for
-   the day. (`phantom_audit.py` implements this via QuotaExhausted.)
-6. Instrument our own counters (no reliable rate-limit headers exist);
-   log daily per-endpoint totals to back into the real cliff empirically.
+5. Classify every 429 before reacting (`Api.call` implements this):
+   - `reason: QUOTA_EXCEEDED`: the developer-account quota is spent. Stop
+     the entire app for the day, whatever Retry-After says (the pool is
+     shared by every app on the account).
+   - no `Retry-After` and no reason, or a wait above 300 s: treated as a
+     spent quota too. Stop for the day; never probe during a penalty.
+   - a short `Retry-After`: a rolling-window throttle. Sleep it out, then
+     continue at the normal pace.
+6. Instrument our own counters (no reliable rate-limit headers exist):
+   `curation-review/apply_run_counters.json` logs daily per-endpoint
+   totals for exports, audits and applies alike.
 
 ## Corrections after direct probing (2026-07-29)
 
@@ -105,6 +121,12 @@ dated; the Feb 2026 API overhaul obsoleted most older figures.
   (`is_playable: false`). Hidden-but-playable ghosts surface only when they
   cause duplicates — which dedup catches via export ISRCs.
 
+- Re-probed 2026-10-06 after the vendored server moved to v0.7.0: Liked
+  membership (`/me/library/contains`) answers 40 ids per call (50 still
+  400s), so membership checks cost 1/8 of the 5-id calls used before. The
+  batch track read (`GET /tracks?ids=`) is still 403 for this app, so
+  per-track data keeps coming from playlist and Liked pages.
+
 ## Retry-After accessibility (why people think it's missing)
 
 - The header IS on the wire; browser JS just can't read it because Spotify
@@ -117,6 +139,17 @@ dated; the Feb 2026 API overhaul obsoleted most older figures.
   Library users conclude "no Retry-After" — it was consumed internally. Our
   scripts zero the retry config and rebuild the session (phantom_audit.py)
   so the header reaches our own handler.
+- spotipy's warning "Retry will occur after: 0 s" is printed both for a
+  literal `Retry-After: 0` AND for a 429 with no header at all
+  (`retry_header or 0` in `spotipy/util.py`), so the log line cannot tell a
+  burst throttle from an exhausted day.
+- Incident 2026-10-06: a full Liked export (~128 pages) through the plain
+  spotipy client at a 1.0 s pace drew one 429 about 2.5 minutes in. spotipy
+  retried it invisibly and the rest of the export succeeded, so it was a
+  rolling-window throttle, not a spent daily budget. Sustained ~1 req/s is
+  the known edge for this app. Since then `export_playlists.py` routes every
+  request through `apply_plan_runner.Api`: a 2.0 s pace, 429s surfaced with
+  their header, and exports counted in the shared daily ledger.
 
 ## Open questions (nobody knows)
 

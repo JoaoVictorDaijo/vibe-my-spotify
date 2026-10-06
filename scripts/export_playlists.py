@@ -5,6 +5,9 @@ Runs inside spotify-mcp/ so it reuses the server's spotipy client and token
 cache:
     cd spotify-mcp && uv run python ../scripts/export_playlists.py <id>... --out DIR
     cd spotify-mcp && uv run python ../scripts/export_playlists.py --liked --out DIR
+
+Every request goes through apply_plan_runner.Api, so exports share the runner's
+pacing, 429 policy and daily call ledger.
 """
 
 from __future__ import annotations
@@ -14,7 +17,9 @@ import json
 import re
 from pathlib import Path
 
-from spotify_mcp import spotify_api
+from apply_plan_runner import Api
+
+DEFAULT_COUNTERS = Path(__file__).resolve().parent.parent / "curation-review" / "apply_run_counters.json"
 
 
 def slugify(name: str) -> str:
@@ -46,6 +51,10 @@ def _parse_items(items: list, offset: int) -> list[dict]:
                 "artists": [a.get("name") for a in (t.get("artists") or []) if a.get("name")],
                 "artist_ids": [a.get("id") for a in (t.get("artists") or []) if a.get("id")],
                 "album": album.get("name"),
+                # Album identity + size let Liked analysis measure like-coverage
+                # per edition (album-spam = near-full coverage, not a like-burst).
+                "album_id": album.get("id"),
+                "album_total_tracks": album.get("total_tracks"),
                 "year": (album.get("release_date") or "")[:4],
                 "duration_ms": t.get("duration_ms"),
                 # Liked spam-run detection and edition-fix dating both need
@@ -69,12 +78,13 @@ def find_existing(out_dir: Path, pid: str) -> dict | None:
     return None
 
 
-def export_playlist(sp, pid: str, info: dict | None = None) -> dict:
-    info = info or sp.playlist(pid)
+def export_playlist(api: Api, pid: str, info: dict | None = None) -> dict:
+    info = info or api.call("playlist", api.sp.playlist, pid)
     tracks = []
     offset = 0
     while True:
-        page = sp.playlist_items(pid, limit=100, offset=offset, market="from_token")
+        page = api.call("playlist_items", api.sp.playlist_items, pid,
+                        limit=100, offset=offset, market="from_token")
         items = page.get("items") or []
         tracks.extend(_parse_items(items, offset))
         offset += len(items)
@@ -90,11 +100,12 @@ def export_playlist(sp, pid: str, info: dict | None = None) -> dict:
     }
 
 
-def export_liked(sp) -> dict:
+def export_liked(api: Api) -> dict:
     tracks = []
     offset = 0
     while True:
-        page = sp.current_user_saved_tracks(limit=50, offset=offset, market="from_token")
+        page = api.call("saved_tracks", api.sp.current_user_saved_tracks,
+                        limit=50, offset=offset, market="from_token")
         items = page.get("items") or []
         tracks.extend(_parse_items(items, offset))
         offset += len(items)
@@ -127,23 +138,25 @@ def main() -> None:
     ap.add_argument("--force", action="store_true",
                     help="re-export even when snapshot_id is unchanged")
     ap.add_argument("--out", required=True, type=Path)
+    ap.add_argument("--counters", type=Path, default=DEFAULT_COUNTERS,
+                    help="daily per-endpoint call ledger shared with the apply runner")
     args = ap.parse_args()
 
-    sp = spotify_api.Client().sp
+    api = Api(args.counters)
     args.out.mkdir(parents=True, exist_ok=True)
     datasets = []
     for pid in args.playlist_ids:
         # snapshot_id is Spotify's playlist version marker — unchanged
         # snapshot means the cached export is still exact, skip the paging.
-        info = sp.playlist(pid)
+        info = api.call("playlist", api.sp.playlist, pid)
         existing = find_existing(args.out, pid)
         if not args.force and existing and existing.get("snapshot_id") \
                 and existing["snapshot_id"] == info.get("snapshot_id"):
             print(f"{info.get('name', pid)}: unchanged (snapshot match), skipped")
             continue
-        datasets.append(export_playlist(sp, pid, info=info))
+        datasets.append(export_playlist(api, pid, info=info))
     if args.liked:
-        datasets.append(export_liked(sp))
+        datasets.append(export_liked(api))
     for data in datasets:
         slug = slugify(data["name"])
         (args.out / f"{slug}.json").write_text(json.dumps(data, ensure_ascii=False, indent=1))

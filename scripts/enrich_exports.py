@@ -18,7 +18,9 @@ from pathlib import Path
 
 import requests
 
-from spotify_mcp import spotify_api
+from apply_plan_runner import Api, PlanHalt
+
+DEFAULT_COUNTERS = Path(__file__).resolve().parent.parent / "curation-review" / "apply_run_counters.json"
 
 
 def slugify(name: str) -> str:
@@ -37,7 +39,7 @@ def load_exports(out_dir: Path) -> list[dict]:
     return playlists
 
 
-def fetch_genres(sp, playlists: list[dict], out_dir: Path) -> dict:
+def fetch_genres(api: Api, playlists: list[dict], out_dir: Path) -> dict:
     cache_path = out_dir / "artists_genres.json"
     cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}
     names = {}
@@ -47,15 +49,15 @@ def fetch_genres(sp, playlists: list[dict], out_dir: Path) -> dict:
                 names.setdefault(aid, name)
     todo = [a for a in names if a not in cache]
     for i, aid in enumerate(todo):
+        # Best-effort per artist, but a QuotaExhausted propagates and stops the tier.
         try:
-            art = sp.artist(aid)
+            art = api.call("artist", api.sp.artist, aid)
             cache[aid] = {"name": art.get("name") or names[aid], "genres": art.get("genres") or []}
-        except Exception as e:  # noqa: BLE001 — enrichment is best-effort
+        except PlanHalt as e:
             cache[aid] = {"name": names[aid], "genres": [], "error": str(e)[:80]}
         if (i + 1) % 25 == 0:
             print(f"genres {i + 1}/{len(todo)}")
             cache_path.write_text(json.dumps(cache, ensure_ascii=False))
-        time.sleep(0.05)
     cache_path.write_text(json.dumps(cache, ensure_ascii=False, indent=1))
 
     lines = []
@@ -121,8 +123,7 @@ def main() -> None:
     args = ap.parse_args()
     playlists = load_exports(args.out_dir)
     if not args.skip_genres:
-        sp = spotify_api.Client().sp
-        fetch_genres(sp, playlists, args.out_dir)
+        fetch_genres(Api(DEFAULT_COUNTERS), playlists, args.out_dir)
     feats = fetch_audio_features(playlists, args.out_dir)
     write_enriched(playlists, feats, args.out_dir)
 
