@@ -38,6 +38,9 @@ server's spotipy client and token cache:
 - `verdict_convergence.py A.txt B.txt OUT_PREFIX [--field verdict|fallback]` —
   joins two independent judges' verdict files (local, no API): agreements
   become defaults, crossings become owner toggles
+- `gen_moves_plan.py SPEC.json PLAN.json` — turns an owner-approved move spec
+  (creates, moves, adds, removes, title waivers) into a runner plan; refuses
+  to emit on dead URIs, known ghosts, missing sources or URI/ISRC/title twins
 - `apply_plan_runner.py PLAN --journal J` — executes an owner-approved plan
 
 Every Spotify call in these scripts goes through `apply_plan_runner.Api`:
@@ -116,9 +119,8 @@ landscape (Tidal = designated escape hatch):
   probable; clearly different length = different recordings, keep both.
 - Keep order when collapsing copies: Deluxe/Extended > original album >
   compilation/Best-of. The same ranking picks canonical URIs for phantom swaps.
-- Acoustic versions in Acoustic/Folk (approved to become **Unplugged**)
-  duplicating an electric original elsewhere are intentional parallel
-  curation, not dupes.
+- Acoustic versions in Unplugged duplicating an electric original
+  elsewhere are intentional parallel curation, not dupes.
 - Review files: every group carries a computed PROPOSED action; an unchecked
   checkbox executes it, a checked one overrides (flips) it — one uniform
   semantic across all sections.
@@ -183,22 +185,22 @@ returned to their scene homes; Psychedelia refocused to the modern core at
 84; First Wave 17 created for the 1966–74 classics, owner-nurtured under
 floor), Dreamy split (2026-08-26: the slowcore half became the standalone
 **Slowcore** playlist, 46, owner-nurtured; Dreamy is the pure dreampop half;
-no "bridge" category — every row coalesces into a defined bin). The
+no "bridge" category — every row coalesces into a defined bin),
+Acoustic/Folk split (2026-10-06: **Folk** 44 created — folk canon, indie
+folk, acoustic blues; the old playlist renamed **Unplugged** 40 — acoustic
+versions of electric songs and hushed covers; 20 stretches rehomed). The
 placement pipeline these cycles converged on is codified as the repo skill
 `.claude/skills/track-placement` — invoke it for any
 where-does-this-song-belong question.
 
 In flight (state in `curation-review/STATUS.md`): the Liked backfill is
 judged (two rounds, ~1.2k proposed adds) but its apply is held while the
-owner reviews album-likes; Acoustic/Folk is approved to split (2026-10-06):
-a new **Folk** playlist (folk canon + indie folk + acoustic blues) and the
-current playlist renamed **Unplugged** (acoustic versions and covers); a
-Yacht Rock playlist is drafted (`curation-review/yacht/DRAFT.md`). Backlog
+owner reviews album-likes; a Yacht Rock playlist is drafted (`curation-review/yacht/DRAFT.md`). Backlog
 lives in GitHub issues (#2 umbrella, #1 Troi growth, #3–#9).
 Phantom/unplayable cleanup (203 tracks) parked. Owner doctrines
-worth knowing before judging: Acoustic/Folk admits only special acoustic
-VERSIONS or folk-genre tracks (an originally-acoustic song stays with its
-genre archetype); Indie Rock tolerates hushed/slow songs by resident bands;
+worth knowing before judging: Unplugged admits only acoustic VERSIONS of
+electric songs and hushed covers, folk-genre songs live in Folk, and an
+originally-acoustic song stays with its genre archetype; Indie Rock tolerates hushed/slow songs by resident bands;
 scene bands classify album-aware (Strokes precedent), and for PW the test is
 sonic lineage (the Yuck gazey rule), not era.
 
