@@ -18,6 +18,7 @@ class SpotifyMCPErrorCode(Enum):
 
     # API errors
     API_RATE_LIMITED = "api_rate_limited"
+    API_QUOTA_EXCEEDED = "api_quota_exceeded"
     API_UNAVAILABLE = "api_unavailable"
 
     # Device errors
@@ -65,8 +66,61 @@ class SpotifyMCPError(Exception):
     @classmethod
     def from_spotify_exception(cls, exc: SpotifyException) -> SpotifyMCPError:
         """Create SpotifyMCPError from spotipy SpotifyException."""
+        error = cls._classify(exc)
+        reason = getattr(exc, "reason", None)
+        if reason:
+            error.details.setdefault("reason", reason)
+        return error
+
+    @classmethod
+    def _classify(cls, exc: SpotifyException) -> SpotifyMCPError:
         status_code = getattr(exc, "http_status", None)
         error_message = str(exc)
+        # Spotify's machine-readable `reason` (NO_ACTIVE_DEVICE, PREMIUM_REQUIRED,
+        # QUOTA_EXCEEDED, …) is the only reliable discriminator — the prose message
+        # varies. Keep it in `details` on every error: dropping it is what makes
+        # upstream regime changes near-impossible to diagnose from a tool failure.
+        reason = getattr(exc, "reason", None)
+
+        # Reason-keyed cases first; these are exact where the string matching below
+        # is a guess.
+        if reason == "NO_ACTIVE_DEVICE":
+            return cls(
+                SpotifyMCPErrorCode.NO_ACTIVE_DEVICE,
+                "No active Spotify device found",
+                {"http_status": status_code, "reason": reason},
+                "Open Spotify on a device, or use list_devices + transfer_playback",
+            )
+
+        if reason == "PREMIUM_REQUIRED":
+            return cls(
+                SpotifyMCPErrorCode.PREMIUM_REQUIRED,
+                "Spotify Premium is required for this operation",
+                {"http_status": status_code, "reason": reason},
+                "Upgrade to Spotify Premium to use playback features",
+            )
+
+        if reason == "QUOTA_EXCEEDED" or "quota" in error_message.lower():
+            return cls(
+                SpotifyMCPErrorCode.API_QUOTA_EXCEEDED,
+                "Spotify API quota exceeded for this developer account",
+                {"http_status": status_code, "reason": reason},
+                "Development Mode apps share the developer account's quota. "
+                "Stop automatic retries and check Spotify's quota guidance; "
+                "no reset time is guaranteed",
+            )
+
+        # spotipy raises SpotifyException(429, -1, "… Max Retries") when urllib3
+        # exhausts its retries, whatever status was actually retried. We only retry
+        # 500/502/503/504, so this is an outage, not a quota problem — reporting it
+        # as rate limiting sends the caller off to back off on the wrong thing.
+        if status_code == 429 and error_message.rstrip().endswith("Max Retries"):
+            return cls(
+                SpotifyMCPErrorCode.API_UNAVAILABLE,
+                "Spotify API is temporarily unavailable (retries exhausted)",
+                {"http_status": status_code, "retries_exhausted": True},
+                "Try again in a few minutes",
+            )
 
         # Map HTTP status codes to our error codes
         if status_code == 401:
@@ -93,12 +147,15 @@ class SpotifyMCPError(Exception):
                     {"http_status": status_code},
                     "Upgrade to Spotify Premium to use playback features",
                 )
-            elif "scope" in error_message.lower():
+            # `reason` is exact where matching the prose is a guess; spotipy also
+            # prefixes the message with the request URL, which can contain "scope".
+            elif reason == "INSUFFICIENT_SCOPE" or "scope" in error_message.lower():
                 return cls(
                     SpotifyMCPErrorCode.INSUFFICIENT_SCOPE,
                     "Insufficient permissions for this operation",
-                    {"http_status": status_code},
-                    "Re-authenticate with required scopes",
+                    {"http_status": status_code, "reason": reason},
+                    "Reauthorize Spotify to grant the required scopes, then restart "
+                    "the server. Do not delete the auth cache automatically",
                 )
             else:
                 return cls(
@@ -130,11 +187,23 @@ class SpotifyMCPError(Exception):
                 )
 
         elif status_code == 429:
+            retry_after = (getattr(exc, "headers", None) or {}).get("Retry-After")
             return cls(
                 SpotifyMCPErrorCode.API_RATE_LIMITED,
                 "Spotify API rate limit exceeded",
-                {"http_status": status_code},
-                "Wait a moment before making more requests",
+                {"http_status": status_code, "retry_after": retry_after},
+                f"Wait {retry_after}s before retrying"
+                if retry_after
+                else "Wait a moment before making more requests",
+            )
+
+        elif status_code == 410:
+            # A gone route is not a wrong ID or proof of universal API withdrawal.
+            return cls(
+                SpotifyMCPErrorCode.API_UNAVAILABLE,
+                "Spotify no longer serves this capability for this app",
+                {"http_status": status_code, "reason": reason},
+                "Run /spotify-api-watch to check for upstream changes",
             )
 
         elif status_code and status_code >= 500:
@@ -175,6 +244,9 @@ def _format_error(error: SpotifyMCPError) -> str:
     msg = error.message
     if error.suggestion:
         msg += f" — {error.suggestion}"
+    reason = error.details.get("reason")
+    if reason:
+        msg += f" (spotify reason: {reason})"
     return f"{msg} [{error.code.value}]"
 
 

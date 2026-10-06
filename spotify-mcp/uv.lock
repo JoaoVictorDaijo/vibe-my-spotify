@@ -1093,10 +1093,11 @@ wheels = [
 
 [[package]]
 name = "spotify-mcp-jamiew"
-version = "0.3.1"
+version = "0.7.0"
 source = { editable = "." }
 dependencies = [
     { name = "mcp", extra = ["cli"] },
+    { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "spotipy" },
 ]
@@ -1117,9 +1118,10 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mcp", extras = ["cli"], specifier = ">=1.27.1" },
-    { name = "python-dotenv", specifier = ">=1.2.2" },
-    { name = "spotipy", specifier = ">=2.26.0" },
+    { name = "mcp", extras = ["cli"], specifier = ">=1.27.1,<2" },
+    { name = "pydantic", specifier = ">=2.11,<3" },
+    { name = "python-dotenv", specifier = ">=1.2.2,<2" },
+    { name = "spotipy", specifier = ">=2.26.0,<3" },
 ]
 
 [package.metadata.requires-dev]

@@ -42,17 +42,18 @@ class Followers(TypedDict, total=False):
 
 class _TrackRequired(TypedDict):
     name: str
-    id: str
+    # Local files and region-removed tracks carry a null id.
+    id: str | None
 
 
 class TrackObject(_TrackRequired, total=False):
-    uri: str
     artists: list[ArtistRef]
     album: AlbumRef
     release_date: str
     duration_ms: int
     popularity: int
     external_urls: ExternalUrls
+    is_local: bool
 
 
 class _ArtistRequired(TypedDict):

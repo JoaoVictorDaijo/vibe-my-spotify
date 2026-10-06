@@ -1,8 +1,117 @@
 # Changelog
 
-## Unreleased
+## 2026-09-20 — 0.7.0
+- Request `user-follow-read` and prefer artist URIs on `/me/library/contains`, with the
+  legacy `/me/following/contains` fallback. Existing users must reauthorize for the scope;
+  no auth cache is deleted automatically.
+- Preserve 50-item track writes and track/artist checks by chunking upstream requests at
+  40; album checks remain capped at 20. Preserve membership order, reject incomplete chunks,
+  and propagate later-chunk errors rather than reporting partial writes as success.
+- **Intentional behavior change:** `create_playlist` is private by default. Explicit
+  `public=true` still creates public playlists; existing playlists are unchanged.
+- Declare Pydantic directly; retain `mcp[cli]<2`.
+- Document Cloudflare as the canonical local/hosted development direction while keeping
+  Python supported. Resources, prompts, playback confirmation and tool contracts still differ.
+- Simplify setup documentation and add a README banner made with Glif.
+- Correct Spotify access guidance using the [March 9 postponement](https://developer.spotify.com/blog/2026-02-06-update-on-developer-access-and-platform-security),
+  [March external-ID reversal](https://developer.spotify.com/documentation/web-api/references/changes/march-2026),
+  and [July 25-app/shared-developer quota update](https://developer.spotify.com/blog/2026-07-23-web-api-quota-updates).
+  Preserve `QUOTA_EXCEEDED` without an unsupported daily-reset promise. Explain the
+  [five-user/organization extended-access constraints](https://developer.spotify.com/documentation/web-api/concepts/quota-modes),
+  official SDK legacy-route caveat, and [AI ingestion policy](https://developer.spotify.com/policy)
+  beyond training.
+
+## 2026-09-17 — 0.6.1
+- batch every read Spotify allows: `get_tracks` and `get_artist` take up to 50 ids in one
+  request, `get_album` up to 20. `get_artist` returns top tracks, and `get_album` its track
+  list, only for a single-id request — both are per item. A withheld batch route now degrades
+  per kind instead of disabling batching everywhere
+- new `check_saved_tracks` (50), `check_saved_albums` (20) and `check_following_artists` (50):
+  ask what the library already holds in one request instead of paging `get_saved_tracks`.
+  Results are keyed by Spotify id, so a truncated answer errors rather than mis-pairing ids
+- fix library writes: `/me/library` takes its URIs as a query parameter, so the JSON body we
+  sent was rejected with 400 and `save_tracks`/`remove_saved_tracks` only worked via a
+  fallback that pointed at the same route. The legacy branch is now the real `/me/tracks`
+- `unfollow_playlist` goes through the regime fallback instead of the legacy-only route
+- fix `add_to_queue` corrupting `spotify:track:` URIs and share URLs by prefixing them twice
+- stop reporting Spotify outages as quota exhaustion: spotipy raises 429 "Max Retries" when
+  it exhausts 5xx retries, which is now classified as unavailable. 410 is reported as a
+  withdrawn capability, and an insufficient-scope 403 is keyed off Spotify's `reason`
+
+## 2026-09-17 — 0.6.0
+- rename seven tools to match the sibling Cloudflare server, so one set of names covers both:
+  `get_track_info` → `get_tracks`, `get_artist_info` → `get_artist`,
+  `get_album_info` → `get_album`, `get_playlist_info` → `get_playlist`,
+  `get_user_playlists` → `list_playlists`,
+  `modify_playlist_details` → `update_playlist_details`,
+  `reorder_playlist_tracks` → `reorder_playlist`. No aliases: the old names are gone
+
+## 2026-09-17 — 0.5.0
+- retain artist metadata when Spotify withholds top tracks, without hiding authentication errors (#19)
+- retry search at the restricted 10-result cap only for an actual invalid-limit error;
+  cache successful fallbacks and paginate using the returned page size (#20)
+- recover missing playlist totals when contents are readable, retaining metadata when they are forbidden (#21)
+- fall back to individual track reads on a batch 403, caching only after success;
+  authentication and rate-limit errors still propagate (#22)
+- make playback confirmation bounded and nonblocking, allow skips from local tracks,
+  and retain the last observation when a later confirmation read fails.
+  Direct Python callers now await `control_playback`; MCP clients are unchanged (#23)
+- read playlist entries from the `item` key, count `limit`/`offset` in playlist positions,
+  and return local files and unresolved rows instead of dropping them or raising:
+  `Track.id` is optional, `Track.is_local` marks local files, and unresolved rows keep
+  their slot so positions stay usable for reorder and remove
+  (thanks [@tedeuxx](https://github.com/tedeuxx), #16, #18)
+- add a real stdio integration test for CLI startup and session recovery after a tool error
+
+## 2026-07-30 — 0.4.1
+- cap the runtime dependencies below their next major. `mcp` 2.0 removed
+  `mcp.server.fastmcp`, which this server is built on, so the open `>=1.27.1`
+  bound meant every fresh `uvx` install resolved 2.x and died on import —
+  `uv.lock` pins what we run locally, so CI never saw it (affected 0.3.1 and
+  0.4.0)
+- new packaging test fails if a runtime dependency has no upper bound
+
+## 2026-07-30 — 0.4.0
 - new `reorder_playlist_tracks` tool: move a contiguous block of tracks to a new
   position within a playlist (zero-based positions, optional snapshot guard)
+
+### Ported from spotify-mcp-cloudflare
+Changes brought over from the sibling remote server, which is now linked from the
+README as the hosted alternative.
+
+**Breaking:** `playback_control` is split into `get_playback_state` (read-only, so
+it no longer lies in its annotations) and `control_playback`, and `search_tracks`
+is renamed `search_music` since it always searched more than tracks.
+
+- new tools: `get_me`, `list_devices`, `transfer_playback`, `save_tracks`,
+  `remove_saved_tracks`, `unfollow_playlist`, `get_recently_played`,
+  `get_top_items`
+- `control_playback` gains seek, volume, shuffle, repeat, `context_uri` and
+  `device_id` — none of which were reachable before
+- `get_top_items` + `get_recently_played` support discovery when `/recommendations` is
+  unavailable to the app, with a `discover_similar` prompt and a `taste_profile` prompt.
+  Access restrictions are app-dependent, not a universal endpoint withdrawal.
+- Feb 2026 regime fallback: playlist and library writes try the restricted
+  endpoint shape and fall back to the legacy one per family, so the server keeps
+  working whichever regime Spotify serves the app
+- errors keep Spotify's machine-readable `reason` and key `NO_ACTIVE_DEVICE` /
+  `PREMIUM_REQUIRED` / `QUOTA_EXCEEDED` off it rather than off prose; rate limits
+  surface `Retry-After`
+- 429s are no longer retried — quota is counted per developer account since July
+  2026, so a retry burns the pool for every app on the account
+- server-level `instructions`, website URL and icon: whole-surface guidance ships
+  once per session instead of once per tool
+- `modify_playlist_details` and `reorder_playlist_tracks` are now marked
+  `destructiveHint` (they overwrite existing state)
+- `tests/test_tool_metadata.py` fails if a tool ships without a title, icon or
+  behaviour annotations, or if the README tool table drifts from the code
+- new `/spotify-api-watch` skill and `scripts/spotify_api_watch.py`, which probe
+  Spotify's changelog month-space (there is no feed or index) for unreviewed
+  entries
+
+### CI housekeeping
+- GitHub Actions bumped to their latest majors, `setup-uv` pinned to v8.1.0
+- removed the Claude GitHub Actions workflows we weren't using
 
 ## 2026-05-29 — 0.3.1
 - add the `mcp-name:` ownership marker to the README so the MCP Registry can

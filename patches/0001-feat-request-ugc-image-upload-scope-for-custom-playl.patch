@@ -1,0 +1,26 @@
+From ed5117b5dd22cd08158d2d44abf73ff4873fc301 Mon Sep 17 00:00:00 2001
+From: electro-wsl <joaovictordaijo@movetech.dev>
+Date: Tue, 6 Oct 2026 15:42:36 -0300
+Subject: [PATCH] feat: request ugc-image-upload scope for custom playlist
+ cover images
+
+---
+ src/spotify_mcp/spotify_api.py | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/src/spotify_mcp/spotify_api.py b/src/spotify_mcp/spotify_api.py
+index 2147997..161f3dc 100644
+--- a/src/spotify_mcp/spotify_api.py
++++ b/src/spotify_mcp/spotify_api.py
+@@ -79,6 +79,8 @@ SCOPES = [
+     "playlist-read-collaborative",
+     "playlist-modify-private",
+     "playlist-modify-public",
++    # Custom playlist cover images (PUT /playlists/{id}/images)
++    "ugc-image-upload",
+     # Library
+     "user-library-read",
+     "user-library-modify",
+-- 
+2.50.1
+

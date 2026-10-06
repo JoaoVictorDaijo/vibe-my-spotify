@@ -57,11 +57,25 @@ One-time setup (already required before the first successful run):
 
 FastMCP-based MCP server for Spotify Web API integration using Python/`uv`.
 
+The Cloudflare sibling is the canonical development direction: a shared TypeScript core
+with local stdio and hosted adapters. Python remains supported, not deprecated. The sibling
+`updates` PR adds local PKCE login, output schemas, search offset, snapshot reorder guards,
+bounded bulk playlist reads/progress and removal elicitation; do not call PR code deployed.
+Python retains six resource declarations, five prompts and best-effort playback confirmation.
+Tool names do not imply matching arguments, limits or result shapes; see the
+[README comparison](README.md#moving-between-implementations). Preserve Python's distinctive
+behavior until a deliberate consumer migration, not a wholesale rewrite.
+
+Keep `mcp[cli]<2` and the direct Pydantic runtime dependency. CLI workflows remain supported.
+Record compatibility work under Unreleased in CHANGELOG; do not bump/publish a release unless
+requested.
+
 ### Core Files
 - **`src/spotify_mcp/fastmcp_server.py`** - Main MCP server: tools, resources, and prompts using `@mcp.tool()`/`@mcp.resource()`/`@mcp.prompt()` decorators, with typed Pydantic output models
-- **`src/spotify_mcp/spotify_api.py`** - OAuth client wrapper (auth/token management only); tools talk to `self.sp` directly
+- **`src/spotify_mcp/spotify_api.py`** - OAuth client wrapper plus the Feb 2026 regime fallback; tools talk to `self.sp` directly except for the endpoints whose path differs between regimes
 - **`src/spotify_mcp/spotify_types.py`** - TypedDicts for the Spotify response shapes the server consumes
-- **`src/spotify_mcp/utils.py`** - Redirect-URI normalization
+- **`src/spotify_mcp/utils.py`** - Redirect-URI normalization, Spotify ID/URI coercion
+- **`scripts/spotify_api_watch.py`** - Changelog probe behind the `/spotify-api-watch` skill
 
 ### Key Features
 - **MCP Tools**: Playback control, search, queue management, playlist operations, track/artist info
@@ -83,7 +97,96 @@ FastMCP-based MCP server for Spotify Web API integration using Python/`uv`.
 
 ### Code Quality Standards
 - Run `mypy` and `pytest` before every commit
-- Convert Spotify exceptions to MCP-compliant errors
+- Convert Spotify exceptions to MCP-compliant errors, and never drop Spotify's `reason`
 - Include Args/Returns in all tool docstrings
-- Mock external API calls in tests
+
+### New tools need annotations
+Every tool declares a title, a Spotify icon and behaviour hints; `tests/test_tool_metadata.py`
+fails without them, and also if the README tool table drifts from the code.
+
+Get `destructiveHint` right rather than safe-by-default: clients use it to decide what to
+confirm with the user, so marking an additive tool destructive trains people to click through
+the prompts that matter. Destructive means overwrites or deletes existing data
+(`remove_saved_tracks`, `unfollow_playlist`, `reorder_playlist`), not merely "writes"
+(`save_tracks`, `add_to_queue`).
+
+Guidance that applies to the whole surface goes in `INSTRUCTIONS` at the top of
+`fastmcp_server.py`, not into every tool description — it ships once per session instead of
+once per tool, and descriptions are under a size budget.
+
+## The test suite will lie to you
+
+`uv run pytest` runs fully offline against mocked spotipy calls. The sibling project
+[spotify-mcp-cloudflare](https://github.com/jamiew/spotify-mcp-cloudflare) had all 42 of its
+tests green while **every one of its 24 tools was dead in production** — three separate bugs
+sat exactly where the suite substitutes a fake: a bound-`fetch` bug the injected fake couldn't
+see, a scope list no fake consults, and a fallback threshold no test drove with a real 400.
+
+Adding tests against the same mocks would have raised coverage and caught none of it. **Green
+tests are necessary, not sufficient.** After changing `spotify_api.py`, the scopes, or a tool's
+request shape, verify with live MCP calls before reporting done. Prefer real fixtures to new
+mocks; where a mock is unavoidable, treat everything behind it as untested.
+
+Two traps when verifying live:
+- **Scope changes need reauthorization.** Adding `user-follow-read` to `SCOPES` does not
+  upgrade an existing grant. Restart and complete Spotify consent, then retest. Never delete
+  the auth cache automatically, read its contents into logs, or share it.
+- **`with_fallback` caches per process.** A fallback fix doesn't take effect until the server
+  restarts, so a retest against a running server can still show the old failure.
+
+## Spotify API regimes
+
+Feb 2026 split apps into a **full/legacy** and a **restricted** regime that serve different
+paths for the same operation. `with_fallback` in `spotify_api.py` tries restricted first,
+falls back to legacy, and caches the answer per endpoint family. Paths and bodies there are
+ported from spotify-mcp-cloudflare. Keep request-level regression coverage for both shapes.
+
+The [March 9 announcement update](https://developer.spotify.com/blog/2026-02-06-update-on-developer-access-and-platform-security)
+postponed endpoint restrictions for existing integrations; Extended Quota Mode is exempt
+from February's endpoint restrictions. Do not infer universal withdrawal from a date or 403.
+The [March changelog](https://developer.spotify.com/documentation/web-api/references/changes/march-2026)
+reversed external-ID removal. Preserve IDs when present.
+
+Membership and track writes retain public 50-item caps (albums 20), with 40-item upstream
+chunks. Artist membership uses `/me/library/contains` URIs and a legacy follow-route fallback;
+both need `user-follow-read`. Validate every membership chunk before concatenation. Failed
+writes must propagate, never return success after only some chunks; earlier chunks cannot be
+rolled back automatically. New playlists are intentionally private by default.
+
+The official TypeScript SDK's
+[1.2.0 playlist code](https://unpkg.com/@spotify/web-api-ts-sdk@1.2.0/dist/mjs/endpoints/PlaylistsEndpoints.js)
+still uses legacy routes; “official SDK” is not a reason to remove compatibility logic.
+Spotipy is community-maintained.
+
+Search retries an oversized page at 10 only for an invalid-limit response. Batch track reads
+fall back to individual requests on 403. Both cache only successful fallbacks. Spotipy prefixes
+error messages with the request URL: do not mistake its `limit=` parameter for a limit error.
+Artist top tracks and playlist counts are optional enrichment on 403, not on authentication
+or rate-limit failures. `control_playback` is async; confirmation is best effort and returns
+the last observation if a later read fails.
+
+Fields the restricted regime strips (`followers`, `popularity`, `email`, `country`, `product`)
+are optional on every Pydantic model — keep them that way, and never make a
+stripped-in-restricted field required.
+
+Run `/spotify-api-watch` to check for upstream changes and probe which regime we're on. It's
+also the right reflex when a tool starts failing in a way that smells upstream: a sudden
+400/403 on something that worked, missing fields, or shrunken result counts.
+
+### Quotas, sharing and policy
+- The [July 23 quota announcement](https://developer.spotify.com/blog/2026-07-23-web-api-quota-updates)
+  allows 25 apps but shares the Development Mode quota per developer account. Preserve
+  `QUOTA_EXCEEDED`; Python intentionally does not retry 429. Ordinary rate limits retain
+  `Retry-After`. No guaranteed daily/24-hour quota reset is documented.
+- [Quota modes](https://developer.spotify.com/documentation/web-api/concepts/quota-modes)
+  normally limit Development Mode to five allowlisted users with a Premium owner; existing
+  larger allowlists may be grandfathered. Extended access currently requires organizations,
+  an established entity, launched service and at least 250,000 MAU. A hosted URL is not
+  permission for public enrollment; never share Python's single-user token cache.
+- [Developer Policy](https://developer.spotify.com/policy) III.14 restricts AI ingestion,
+  not just training; metadata-only MCP is not automatic clearance. III.13 covers analysis
+  and derived metrics; III.3 covers voice-control assistants. Resolve policy permission
+  before public AI access. Do not market compatibility work as Spotify approval.
+- If playlist visibility reads back unexpectedly, verify it in the Spotify app rather than
+  assuming the write succeeded or making a universal claim about Spotify's reporting.
 

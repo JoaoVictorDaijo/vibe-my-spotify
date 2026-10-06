@@ -6,10 +6,31 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from spotify_mcp import spotify_api
+
+
+@pytest.fixture(autouse=True)
+def reset_regime_cache():
+    """`with_fallback` caches the resolved regime per family for the life of the
+    process, so without this one test's fallback pins every later one."""
+    spotify_api._legacy_families.clear()
+    yield
+    spotify_api._legacy_families.clear()
+
+
+@pytest.fixture(autouse=True)
+def no_playback_confirm_delay():
+    """`control_playback` waits between read-backs while confirming an action took
+    effect. A static mock never changes, so every unconfirmable action would burn the
+    full delay budget and the suite would crawl. Attempt count is left alone so the
+    retry behaviour itself stays under test."""
+    with patch("spotify_mcp.fastmcp_server._CONFIRM_DELAY_S", 0):
+        yield
+
+
 # Sample Spotify API response data for testing
 SAMPLE_TRACK = {
     "id": "4iV5W9uYEdYUVa79Axb7Rh",
-    "uri": "spotify:track:4iV5W9uYEdYUVa79Axb7Rh",
     "name": "Never Gonna Give You Up",
     "artists": [{"name": "Rick Astley", "id": "0gxyHStUsqpMadRV0Di1Qt"}],
     "album": {"name": "Whenever You Need Somebody", "id": "6XzKGcM6laRkTrME3rQvJw"},
@@ -114,7 +135,7 @@ def mock_spotify_client():
     mock_client.playlist.return_value = SAMPLE_PLAYLIST
     mock_client.track.return_value = SAMPLE_TRACK
     mock_client.playlist_add_items.return_value = {"snapshot_id": "test123"}
-    mock_client.current_user_playlist_create.return_value = SAMPLE_PLAYLIST
+    mock_client.user_playlist_create.return_value = SAMPLE_PLAYLIST
 
     return mock_client
 
