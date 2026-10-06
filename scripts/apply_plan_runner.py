@@ -64,6 +64,8 @@ def _load_spotify():
 PACE_SECONDS = 2.0
 QUOTA_STOP_SECONDS = 300
 QUOTA_REASON = "QUOTA_EXCEEDED"  # error.reason on quota 429s (Spotify blog 2026-07-23)
+# One daily per-endpoint ledger for every script that calls Spotify.
+DEFAULT_COUNTERS = Path(__file__).resolve().parent.parent / "curation-review" / "apply_run_counters.json"
 PHASE4_COOLDOWN_SECONDS = 60
 TRANSIENT_STATUS = (500, 502, 503, 504)
 PAGE = 100
@@ -866,7 +868,7 @@ def phase4(api: Api, plan: dict, journal: Journal, created: dict[str, str]) -> i
 
 def run(plan: dict, args, sp=None) -> int:
     journal_path = args.journal or args.plan.parent / "apply_journal.jsonl"
-    counters_path = args.plan.parent / "apply_run_counters.json"
+    counters_path = getattr(args, "counters", None) or args.plan.parent / "apply_run_counters.json"
     run_id = uuid.uuid4().hex
     journal = None
     api = None
@@ -934,6 +936,8 @@ def main() -> None:
                     help="print the full op sequence and exit; makes zero API calls")
     ap.add_argument("--phase", type=float, default=None, help="run a single phase and stop")
     ap.add_argument("--yes", action="store_true", help="skip the interactive canary gates")
+    ap.add_argument("--counters", type=Path, default=DEFAULT_COUNTERS,
+                    help="daily call ledger shared with the export/audit scripts")
     args = ap.parse_args()
 
     plan = json.loads(args.plan.read_text())

@@ -18,9 +18,8 @@ from pathlib import Path
 
 import requests
 
-from apply_plan_runner import Api, PlanHalt
+from apply_plan_runner import DEFAULT_COUNTERS, Api, PlanHalt
 
-DEFAULT_COUNTERS = Path(__file__).resolve().parent.parent / "curation-review" / "apply_run_counters.json"
 
 
 def slugify(name: str) -> str:
