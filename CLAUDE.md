@@ -48,7 +48,8 @@ one request per 2 s, 429s classified per the rule below, and a shared daily
 per-endpoint ledger in `curation-review/apply_run_counters.json`. A full
 Liked export therefore takes ~4.5 minutes.
 
-Feb 2026 API notes: playlist items nest the track under `"item"`; batch GET
+Feb 2026 API notes: `artist_albums` rejects limit > 10 (400 "Invalid limit",
+2026-10-06); playlist items nest the track under `"item"`; batch GET
 endpoints are gone (403, re-probed 2026-10-06 on `/tracks?ids=`); **/search is 403-forbidden for this app entirely**
 (both plain and `isrc:` queries — probe-verified 2026-07-29), so the MCP
 search tool and any search-based flow are dead: adds need URIs from exports
@@ -163,7 +164,7 @@ file), 90s Alternative 53, Laurel Canyon 49, Britpop 40 (owner-nurtured,
 under floor by choice). Overlay: Night Wave 18 (copies, dedup-exempt; Third Eye
 held this role until 2026-08-01). Open homes:
 Alternative Rock 101, Rock 109, Acoustic/Folk 76. Empty shell kept: 70's
-Sunday Rock. Joined post-apply (2026-07-30, owner request): New Wave /
+Sunday Rock (became Yacht Rock 2026-10-06). Joined post-apply (2026-07-30, owner request): New Wave /
 Synthwave 94 — a PRIMARY HOME for synth-flavored tracks, cleaned same day
 in two owner-ruled applied plans (dedup keepers, stray sweep, Julian
 Casablancas united there; Indie Rock kept its synth block minus
@@ -188,14 +189,17 @@ floor), Dreamy split (2026-08-26: the slowcore half became the standalone
 no "bridge" category — every row coalesces into a defined bin),
 Acoustic/Folk split (2026-10-06: **Folk** 44 created — folk canon, indie
 folk, acoustic blues; the old playlist renamed **Unplugged** 40 — acoustic
-versions of electric songs and hushed covers; 20 stretches rehomed). The
+versions of electric songs and hushed covers; 20 stretches rehomed),
+Yacht Rock (2026-10-06: **Yacht Rock** 70 built in the old 70's Sunday Rock
+shell — Steely Dan spine, US AOR, blue-eyed soul, UK sophisti-pop, modern
+revival; city pop and Brazilian AOR held for later). The
 placement pipeline these cycles converged on is codified as the repo skill
 `.claude/skills/track-placement` — invoke it for any
 where-does-this-song-belong question.
 
 In flight (state in `curation-review/STATUS.md`): the Liked backfill is
 judged (two rounds, ~1.2k proposed adds) but its apply is held while the
-owner reviews album-likes; a Yacht Rock playlist is drafted (`curation-review/yacht/DRAFT.md`). Backlog
+owner reviews album-likes. Backlog
 lives in GitHub issues (#2 umbrella, #1 Troi growth, #3–#9).
 Phantom/unplayable cleanup (203 tracks) parked. Owner doctrines
 worth knowing before judging: Unplugged admits only acoustic VERSIONS of
