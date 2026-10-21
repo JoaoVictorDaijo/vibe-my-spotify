@@ -52,7 +52,9 @@ canonical for each playlist — good enough to advise, eventually to suggest.
   them: two-record journal, **adds strictly before removals**, hard
   verification gate before any deletion, drift = halt, canary on first
   write, resumable after interruption, full-content verification at the
-  end. 100+ tests including fault injection.
+  end. The same discipline covers Liked Songs (ghost-edition swaps: save the
+  canonical, verify by read-back, then unlike the ghost). 100+ tests
+  including fault injection.
 - Every account write requires an explicitly owner-approved plan.
 
 ### The ghost fixer

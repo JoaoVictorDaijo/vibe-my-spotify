@@ -39,9 +39,12 @@ server's spotipy client and token cache:
   joins two independent judges' verdict files (local, no API): agreements
   become defaults, crossings become owner toggles
 - `gen_moves_plan.py SPEC.json PLAN.json` — turns an owner-approved move spec
-  (creates, moves, adds, removes, title waivers) into a runner plan; refuses
-  to emit on dead URIs, known ghosts, missing sources or URI/ISRC/title twins
-- `apply_plan_runner.py PLAN --journal J` — executes an owner-approved plan
+  (creates, moves, adds, removes, title waivers, Liked saves/removes) into a
+  runner plan; refuses to emit on dead URIs, known ghosts, missing sources or
+  URI/ISRC/title twins
+- `apply_plan_runner.py PLAN --journal J` — executes an owner-approved plan,
+  playlists and Liked Songs alike (Liked writes are proven by a
+  `/me/library/contains` read-back, since Liked has no snapshot_id)
 
 Every Spotify call in these scripts goes through `apply_plan_runner.Api`:
 one request per 2 s, 429s classified per the rule below, and a shared daily
@@ -164,7 +167,7 @@ file), 90s Alternative 53, Laurel Canyon 49, Britpop 40 (owner-nurtured,
 under floor by choice). Overlay: Night Wave 18 (copies, dedup-exempt; Third Eye
 held this role until 2026-08-01). Open homes:
 Alternative Rock 101, Rock 109, Acoustic/Folk 76. Empty shell kept: 70's
-Sunday Rock (became Yacht Rock 2026-10-06). Joined post-apply (2026-07-30, owner request): New Wave /
+Sunday Rock (became Yacht Rock 2026-10-06, owner-renamed Soft 70's 2026-10-21). Joined post-apply (2026-07-30, owner request): New Wave /
 Synthwave 94 — a PRIMARY HOME for synth-flavored tracks, cleaned same day
 in two owner-ruled applied plans (dedup keepers, stray sweep, Julian
 Casablancas united there; Indie Rock kept its synth block minus
@@ -190,9 +193,10 @@ no "bridge" category — every row coalesces into a defined bin),
 Acoustic/Folk split (2026-10-06: **Folk** 44 created — folk canon, indie
 folk, acoustic blues; the old playlist renamed **Unplugged** 40 — acoustic
 versions of electric songs and hushed covers; 20 stretches rehomed),
-Yacht Rock (2026-10-06: **Yacht Rock** 70 built in the old 70's Sunday Rock
-shell — Steely Dan spine, US AOR, blue-eyed soul, UK sophisti-pop, modern
-revival; city pop and Brazilian AOR held for later). The
+Yacht Rock (2026-10-06: built in the old 70's Sunday Rock shell — Steely
+Dan spine, US AOR, blue-eyed soul, UK sophisti-pop, modern revival; the
+owner then reshaped it into **Soft 70's** 73 — mellow 70s rock with groove,
+Steely Dan trimmed — see vibes/soft-70s.md; city pop and Brazilian AOR out). The
 placement pipeline these cycles converged on is codified as the repo skill
 `.claude/skills/track-placement` — invoke it for any
 where-does-this-song-belong question.

@@ -9,7 +9,9 @@ reach the account:
     a known ghost in the URI remap registry;
   * no destination ends up with a URI, ISRC or fuzzy-title twin — titles may be
     waived per destination for deliberate different-recording pairs, ISRCs never;
-  * no URI is both added to and removed from the same playlist.
+  * no URI is both added to and removed from the same playlist;
+  * Liked saves are playable, not already liked and leave no ISRC twin in Liked;
+    Liked removals are liked today (the fresh liked-songs.json export).
 
 Spec (JSON):
     {"config_id": "...", "status": "owner-approved: ...",
@@ -20,7 +22,9 @@ Spec (JSON):
      "moves":   [{"uri": "...", "from": "Acoustic/Folk", "to": "Folk"}],
      "adds":    [{"uri": "...", "to": "Folk"}],          # e.g. from Liked
      "removes": [{"uri": "...", "from": "Acoustic/Folk"}],
-     "title_waivers": [{"to": "Laurel Canyon", "title": "Harvest Moon"}]}
+     "title_waivers": [{"to": "Laurel Canyon", "title": "Harvest Moon"}],
+     "liked_saves":   ["spotify:track:..."],   # e.g. a ghost's canonical
+     "liked_removes": ["spotify:track:..."]}   # e.g. the ghost itself
 
 Usage: gen_moves_plan.py SPEC.json OUT_PLAN.json
 """
@@ -52,23 +56,63 @@ def label(t: dict) -> str:
     return f"{', '.join(t.get('artists') or ['?'])} – {t.get('name')}"
 
 
-def load_exports(d: Path) -> tuple[dict[str, dict], dict[str, dict]]:
-    """Playlists by name, plus a uri → track row index over every export incl. Liked."""
-    playlists, rows = {}, {}
+def contains_calls(uris: list[str]) -> int:
+    return max(1, -(-len(uris) // CHUNK))
+
+
+def check_liked(saves: list[str], unsaves: list[str], liked: list[dict] | None,
+                rows: dict[str, dict], ghosts: set[str]) -> list[str]:
+    """Liked swaps must start from today's Liked and end without an edition twin."""
+    if liked is None:
+        return ["liked saves/removes need a fresh liked-songs.json in the exports dir"]
+    errors = []
+    liked_uris = {t["uri"] for t in liked}
+    for u in unsaves:
+        if u not in liked_uris:
+            errors.append(f"Liked: removal target is not liked today {u}")
+    for u, n in Counter(saves + unsaves).items():
+        if n > 1:
+            errors.append(f"Liked: listed twice or both saved and removed {u}")
+    after = [t for t in liked if t["uri"] not in set(unsaves)]
+    have_isrc = {t["isrc"]: t for t in after if t.get("isrc")}
+    for u in saves:
+        t = rows.get(u)
+        if t is None:
+            errors.append(f"Liked: no export row for save target {u}")
+            continue
+        if u in liked_uris:
+            errors.append(f"Liked: already liked {label(t)}")
+        if t.get("is_playable") is False and not t.get("canonical_id"):
+            errors.append(f"Liked: dead URI (unplayable, no relink) {label(t)}")
+        if u in ghosts:
+            errors.append(f"Liked: known ghost URI, save its canonical instead: {label(t)}")
+        if t.get("isrc") and t["isrc"] in have_isrc:
+            errors.append(f"Liked: ISRC twin {label(t)} = {label(have_isrc[t['isrc']])}")
+        if t.get("isrc"):
+            have_isrc[t["isrc"]] = t
+    return errors
+
+
+def load_exports(d: Path) -> tuple[dict[str, dict], dict[str, dict], list[dict] | None]:
+    """Playlists by name, a uri → track row index over every export incl. Liked, and
+    the Liked rows themselves when the export directory holds them."""
+    playlists, rows, liked = {}, {}, None
     for p in sorted(d.glob("*.json")):
         data = json.loads(p.read_text())
         if not isinstance(data, dict) or "tracks" not in data:
             continue
         if data.get("id") != "liked-songs":
             playlists[data["name"]] = data
+        else:
+            liked = data["tracks"]
         for t in data["tracks"]:
             rows.setdefault(t["uri"], t)
-    return playlists, rows
+    return playlists, rows, liked
 
 
 def build(spec: dict) -> tuple[dict | None, list[str]]:
     errors: list[str] = []
-    playlists, rows = load_exports(Path(spec["exports"]))
+    playlists, rows, liked = load_exports(Path(spec["exports"]))
     for path in spec.get("metadata", []):
         for t in json.loads(Path(path).read_text())["tracks"]:
             rows.setdefault(t["uri"], t)
@@ -140,6 +184,10 @@ def build(spec: dict) -> tuple[dict | None, list[str]]:
                 have_isrc[isrc] = t
             have_title.setdefault(key, t)
 
+    saves, unsaves = spec.get("liked_saves", []), spec.get("liked_removes", [])
+    if saves or unsaves:
+        errors += check_liked(saves, unsaves, liked, rows, ghosts)
+
     if errors:
         return None, errors
 
@@ -151,6 +199,9 @@ def build(spec: dict) -> tuple[dict | None, list[str]]:
                     "playlist_name": name, "calls": 2,
                     "cold_start_expected_snapshot_id": pl["snapshot_id"],
                     "cold_start_expected_total": pl["total"]})
+    if saves or unsaves:
+        ops.append({"phase": 0, "action": "liked_check", "playlist_id_or_name": "liked-songs",
+                    "playlist_name": "Liked Songs", "calls": contains_calls(saves + unsaves)})
     for i, (name, c) in enumerate(created.items()):
         ops.append({"phase": 1, "action": "create_playlist", "playlist_id_or_name": name,
                     "playlist_name": name, "calls": 1, "canary": i == 0,
@@ -174,6 +225,16 @@ def build(spec: dict) -> tuple[dict | None, list[str]]:
         base = 0 if dest in created else playlists[dest]["total"]
         ops.append({"phase": 2.5, "action": "verify_total", "playlist_id_or_name": target(dest),
                     "playlist_name": dest, "calls": 1, "expected_total": base + len(adds[dest])})
+    for ci, part in enumerate(chunks(saves)):
+        ops.append({"phase": 2, "action": "save_liked", "playlist_id_or_name": "liked-songs",
+                    "playlist_name": "Liked Songs", "uris": part, "count": len(part),
+                    "chunk_index": ci, "chunks_total": len(chunks(saves)),
+                    "calls": 1 + contains_calls(part), "canary": first_write})
+        first_write = False
+        budget_writes += 1
+    if saves:
+        ops.append({"phase": 2.5, "action": "verify_liked_saved", "playlist_id_or_name": "liked-songs",
+                    "playlist_name": "Liked Songs", "uris": saves, "calls": contains_calls(saves)})
     for src in sorted(removes):
         parts = chunks(removes[src])
         for ci, part in enumerate(parts):
@@ -181,6 +242,13 @@ def build(spec: dict) -> tuple[dict | None, list[str]]:
                         "playlist_name": src, "calls": 1, "uris": part, "count": len(part),
                         "chunk_index": ci, "chunks_total": len(parts)})
             budget_writes += 1
+
+    for ci, part in enumerate(chunks(unsaves)):
+        ops.append({"phase": 3, "action": "unsave_liked", "playlist_id_or_name": "liked-songs",
+                    "playlist_name": "Liked Songs", "uris": part, "count": len(part),
+                    "chunk_index": ci, "chunks_total": len(chunks(unsaves)),
+                    "calls": 1 + contains_calls(part)})
+        budget_writes += 1
 
     end_state: dict[str, list[str]] = {}
     for name in touched:
@@ -192,6 +260,10 @@ def build(spec: dict) -> tuple[dict | None, list[str]]:
     for name, uris in end_state.items():
         ops.append({"phase": 4, "action": "reexport_verify", "playlist_id_or_name": target(name),
                     "playlist_name": name, "calls": max(1, -(-len(uris) // PAGE))})
+
+    if saves or unsaves:
+        ops.append({"phase": 4, "action": "verify_liked", "playlist_id_or_name": "liked-songs",
+                    "playlist_name": "Liked Songs", "calls": contains_calls(saves + unsaves)})
 
     detail = lambda uris: [{"uri": u, "track": label(rows[u])} for u in uris]  # noqa: E731
     plan = {
@@ -213,6 +285,7 @@ def build(spec: dict) -> tuple[dict | None, list[str]]:
         "add_detail": {n: detail(u) for n, u in adds.items()},
         "remove_detail": {n: detail(u) for n, u in removes.items()},
         "expected_end_state": end_state,
+        "liked_detail": {"save": detail(saves), "unsave": detail(unsaves)},
     }
     return plan, []
 
@@ -231,6 +304,9 @@ def main() -> int:
     Path(sys.argv[2]).write_text(json.dumps(plan, ensure_ascii=False, indent=1))
     print(f"plan {plan['config_id']}: {plan['budget']['total']['calls_expected']} calls "
           f"({plan['budget']['total']['write_calls']} writes)")
+    if plan["liked_detail"]["save"] or plan["liked_detail"]["unsave"]:
+        print(f"  {'Liked Songs':<24} +{len(plan['liked_detail']['save']):<3} "
+              f"-{len(plan['liked_detail']['unsave']):<3}")
     for name, uris in plan["expected_end_state"].items():
         a = len(plan["add_detail"].get(name, []))
         r = len(plan["remove_detail"].get(name, []))

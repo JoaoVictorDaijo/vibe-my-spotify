@@ -20,6 +20,9 @@ Safety model (see the plan's apply_plan.md):
   * every call gets an `attempt` journal record before it and a `done` record only
     after a verified-successful response, so a failed call can never be mistaken for a
     completed one on resume;
+  * Liked Songs ops (save_liked in phase 2, unsave_liked in phase 3) follow the same
+    order: Liked carries no snapshot_id, so each write counts as done only once a
+    /me/library/contains read-back shows every URI in its target state;
   * a quota 429 (reason QUOTA_EXCEEDED, no wait hint, or a long wait) halts the
     whole run; a rate-limit 429 with a short Retry-After sleeps and continues
     (docs/spotify-rate-limits.md).
@@ -69,6 +72,8 @@ DEFAULT_COUNTERS = Path(__file__).resolve().parent.parent / "curation-review" / 
 PHASE4_COOLDOWN_SECONDS = 60
 TRANSIENT_STATUS = (500, 502, 503, 504)
 PAGE = 100
+LIKED = "liked-songs"  # journal playlist_id for Liked Songs ops
+CONTAINS_CHUNK = 40  # /me/library/contains 400s above 40 ids
 
 GATE_PHASE25 = "phase25_pass"
 
@@ -464,6 +469,50 @@ def fetch_total(api: Api, playlist_id: str) -> int | None:
     return (page or {}).get("total")
 
 
+def fetch_liked(api: Api, uris: list[str]) -> dict[str, bool]:
+    """Whether each URI is in Liked Songs, read by URI (an edition twin reads False).
+
+    Liked Songs has no snapshot_id, so this read-back is the only evidence a Liked
+    write landed — a malformed answer is a read failure, never a verdict.
+    """
+    out: dict[str, bool] = {}
+    for i in range(0, len(uris), CONTAINS_CHUNK):
+        part = uris[i:i + CONTAINS_CHUNK]
+        res = api.call("liked_contains", api.sp.current_user_saved_tracks_contains, tracks=part)
+        if not isinstance(res, list) or len(res) != len(part):
+            raise PlanHalt(f"liked_contains answered {res!r} for {len(part)} id(s) — "
+                           "a read failure, not drift")
+        out.update(zip(part, (bool(x) for x in res)))
+    return out
+
+
+def _liked_write(api: Api, journal: Journal, seq: int, op: dict, uris: list[str],
+                 save: bool) -> None:
+    """One Liked write, journalled as done only once a read-back shows every URI moved."""
+    endpoint, fn = (("save_liked", api.sp.current_user_saved_tracks_add) if save
+                    else ("unsave_liked", api.sp.current_user_saved_tracks_delete))
+    journal.attempt(seq, op, LIKED, uris=uris)
+    api.call(endpoint, fn, tracks=uris)
+    live = fetch_liked(api, uris)
+    stuck = [u for u in uris if live[u] != save]
+    if stuck:
+        journal.done(seq, ok=False, detail=f"read-back: {len(stuck)} uri(s) unchanged")
+        raise PlanHalt(f"{endpoint}: {len(stuck)} uri(s) did not change on read-back: {stuck[:5]}")
+    journal.done(seq, ok=True, http_status=200, snapshot_id="verified-by-contains",
+                 placeholder=True)
+
+
+def _liked_resume(api: Api, journal: Journal, seq: int, uris: list[str],
+                  save: bool) -> list[str]:
+    """For an UNKNOWN Liked write, the URIs still to write (empty: it landed)."""
+    live = fetch_liked(api, uris)
+    todo = [u for u in uris if live[u] != save]
+    if not todo:
+        journal.done(seq, ok=True, snapshot_id="verified-by-contains", placeholder=True,
+                     detail="read-back shows the write landed")
+    return todo
+
+
 def _write_snapshot(api: Api, endpoint: str, fn, *args, **kwargs) -> str:
     """One write, returning the snapshot_id that proves it landed."""
     res = api.call(endpoint, fn, *args, **kwargs)
@@ -590,6 +639,14 @@ def phase0(api: Api, plan: dict, journal: Journal, resume: bool) -> None:
         drifted.append(detail)
         print(f"  {name:<20} DRIFT — {'; '.join(detail['classes'])}")
 
+    for seq, op in enumerate(plan["ops"]):
+        if op["phase"] == 0 and op["action"] == "liked_check":
+            detail = _liked_drift(api, plan, journal, seq, op, resume)
+            print(f"  {'Liked Songs':<20} " + (f"DRIFT — {'; '.join(detail['classes'])}"
+                                               if detail else "unchanged"))
+            if detail:
+                drifted.append(detail)
+
     if drifted:
         journal.note("drift_detected", playlists=[d["playlist"] for d in drifted], detail=drifted)
         lines = []
@@ -601,6 +658,35 @@ def phase0(api: Api, plan: dict, journal: Journal, resume: bool) -> None:
                 lines.append(f"        removal target duplicated {uri}")
         raise PlanDrift("playlist state drifted — re-export and regenerate the plan\n"
                         + "\n".join(lines))
+
+
+def _liked_drift(api: Api, plan: dict, journal: Journal, seq: int, op: dict,
+                 resume: bool) -> dict | None:
+    """Compare the live like state of every planned URI with what the plan expects.
+
+    Saves start unliked and removals start liked; on a resume the journal's completed
+    writes flip that expectation, and a write of UNKNOWN outcome accepts either state.
+    """
+    saves = [e["uri"] for e in plan["liked_detail"]["save"]]
+    unsaves = [e["uri"] for e in plan["liked_detail"]["unsave"]]
+    journal.attempt(seq, op, LIKED, uris=saves + unsaves)
+    live = fetch_liked(api, saves + unsaves)
+    journal.done(seq, ok=True, snapshot_id="n/a-read", placeholder=True)
+    saved = journal.done_write_uris(LIKED, "save_liked") if resume else set()
+    unsaved = journal.done_write_uris(LIKED, "unsave_liked") if resume else set()
+    pending = (journal.pending_write_uris(LIKED, "save_liked")
+               | journal.pending_write_uris(LIKED, "unsave_liked")) if resume else set()
+    already = [u for u in saves if u not in pending and live[u] != (u in saved)]
+    vanished = [u for u in unsaves if u not in pending and live[u] != (u not in unsaved)]
+    if not (already or vanished):
+        return None
+    classes = []
+    if already:
+        classes.append(f"{len(already)} save target(s) in an unexpected like state")
+    if vanished:
+        classes.append(f"{len(vanished)} removal target(s) in an unexpected like state")
+    return {"playlist": "Liked Songs", "playlist_id": LIKED, "classes": classes,
+            "vanished": vanished, "duplicated": [], "unexpected_saves": already}
 
 
 def _export_baseline(plan: dict, name: str) -> Counter:
@@ -736,6 +822,9 @@ def phase2(api: Api, plan: dict, journal: Journal, created: dict[str, str],
         raise PlanHalt(f"phase 2 gate: these playlists do not exist yet: {missing} — run phase 1")
 
     for seq, op in enumerate(plan["ops"]):
+        if op["phase"] == 2 and op["action"] == "save_liked":
+            _liked_phase_op(api, journal, seq, op, save=True, assume_yes=assume_yes)
+            continue
         if op["phase"] != 2 or op["action"] != "add_tracks":
             continue
         pid = resolve_pid(op, created)
@@ -768,6 +857,26 @@ def phase2(api: Api, plan: dict, journal: Journal, created: dict[str, str],
                      assume_yes)
 
 
+def _liked_phase_op(api: Api, journal: Journal, seq: int, op: dict, *, save: bool,
+                    assume_yes: bool = True) -> None:
+    label = f"Liked Songs {'+' if save else '-'} {op['chunk_index'] + 1}/{op['chunks_total']}"
+    if journal.status(seq) == "done":
+        print(f"  {label:<30} already done")
+        return
+    uris = list(op["uris"])
+    if journal.status(seq) == "unknown":
+        # Re-saving or re-removing is harmless, but a landed write must still be
+        # journalled as done before the gate can trust it.
+        uris = _liked_resume(api, journal, seq, uris, save)
+        if not uris:
+            print(f"  {label:<30} verified by read-back")
+            return
+    _liked_write(api, journal, seq, op, uris, save)
+    print(f"  {label:<30} {'+' if save else '-'}{len(uris)}")
+    if op.get("canary"):
+        _confirm(f"first Liked write landed ({len(uris)} track(s))", assume_yes)
+
+
 def phase25(api: Api, plan: dict, journal: Journal, created: dict[str, str],
             run_id: str) -> None:
     """The hard gate for phase 3: every add target's total must match.
@@ -780,7 +889,7 @@ def phase25(api: Api, plan: dict, journal: Journal, created: dict[str, str],
     # The journal check is free, so it runs first: a gate invoked before phase 2 has
     # finished fails without spending 17 calls proving what the journal already knows.
     unfinished = [op["playlist_name"] for seq, op in enumerate(plan["ops"])
-                  if op["phase"] == 2 and op["action"] == "add_tracks"
+                  if op["phase"] == 2 and op["action"] in ("add_tracks", "save_liked")
                   and journal.status(seq) != "done"]
     if unfinished:
         raise PlanHalt(f"phase 2.5 gate failed: {len(unfinished)} phase-2 add op(s) are not done "
@@ -788,6 +897,17 @@ def phase25(api: Api, plan: dict, journal: Journal, created: dict[str, str],
 
     failures = []
     for seq, op in enumerate(plan["ops"]):
+        if op["phase"] == 2.5 and op["action"] == "verify_liked_saved":
+            journal.attempt(seq, op, LIKED)
+            live = fetch_liked(api, op["uris"])
+            missing = [u for u in op["uris"] if not live[u]]
+            journal.done(seq, ok=True, snapshot_id="n/a-read", placeholder=True,
+                         detail=f"saved={len(op['uris']) - len(missing)} expected={len(op['uris'])}")
+            print(f"  {'Liked Songs':<24} {len(op['uris']) - len(missing):>4} / "
+                  f"{len(op['uris']):<4} {'ok' if not missing else 'MISMATCH'}")
+            if missing:
+                failures.append(("Liked Songs", f"{len(missing)} save(s) not liked", missing[:5]))
+            continue
         if op["phase"] != 2.5 or op["action"] != "verify_total":
             continue
         pid = resolve_pid(op, created)
@@ -821,6 +941,9 @@ def phase3(api: Api, plan: dict, journal: Journal, created: dict[str, str],
         phase25(api, plan, journal, created, run_id)
 
     for seq, op in enumerate(plan["ops"]):
+        if op["phase"] == 3 and op["action"] == "unsave_liked":
+            _liked_phase_op(api, journal, seq, op, save=False)
+            continue
         if op["phase"] != 3 or op["action"] != "remove_tracks":
             continue
         name, pid = op["playlist_name"], resolve_pid(op, created)
@@ -842,6 +965,21 @@ def phase4(api: Api, plan: dict, journal: Journal, created: dict[str, str]) -> i
     new_names = {p["name"] for p in plan["new_playlists"]}
     problems = 0
     for seq, op in enumerate(plan["ops"]):
+        if op["phase"] == 4 and op["action"] == "verify_liked":
+            saves = [e["uri"] for e in plan["liked_detail"]["save"]]
+            unsaves = [e["uri"] for e in plan["liked_detail"]["unsave"]]
+            journal.attempt(seq, op, LIKED)
+            live = fetch_liked(api, saves + unsaves)
+            wrong = [u for u in saves if not live[u]] + [u for u in unsaves if live[u]]
+            journal.done(seq, ok=True, snapshot_id="n/a-read", placeholder=True,
+                         detail=f"wrong={len(wrong)}")
+            print(f"  {'Liked Songs':<24} +{len(saves)} -{len(unsaves)}  "
+                  f"{'ok' if not wrong else f'MISMATCH ({len(wrong)})'}")
+            if wrong:
+                problems += 1
+                journal.note("verify_mismatch", playlist="Liked Songs", wrong=wrong[:20],
+                             wrong_count=len(wrong))
+            continue
         if op["phase"] != 4 or op["action"] != "reexport_verify":
             continue
         name = op["playlist_name"]

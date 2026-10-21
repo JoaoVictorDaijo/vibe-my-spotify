@@ -64,7 +64,7 @@ class FakeRetryError(Exception):
     pass
 
 
-WRITE_ENDPOINTS = ("create_playlist", "add_tracks", "remove_tracks")
+WRITE_ENDPOINTS = ("create_playlist", "add_tracks", "remove_tracks", "save_liked", "unsave_liked")
 
 
 class FakeSpotify:
@@ -79,6 +79,8 @@ class FakeSpotify:
         self._rev = {pid: 0 for pid in store}
         self.calls: list[tuple[str, str]] = []
         self.faults: dict[str, list] = {}
+        self.liked: set[str] = set()
+        self.ignore_saves: set[str] = set()
         self._created = 0
         # spotipy attributes the session rebuild touches
         self.retries = 3
@@ -167,6 +169,22 @@ class FakeSpotify:
         drop = set(items)
         self.store[pid] = [u for u in self.store[pid] if u not in drop]
         return {"snapshot_id": self.touch(pid)}
+
+
+    # ---- Liked Songs (/me/library) ---- #
+    def current_user_saved_tracks_add(self, tracks=None):
+        self._maybe_fail("save_liked")
+        self.liked |= set(tracks) - self.ignore_saves
+
+    def current_user_saved_tracks_delete(self, tracks=None):
+        self._maybe_fail("unsave_liked")
+        self.liked -= set(tracks)
+
+    def current_user_saved_tracks_contains(self, tracks=None):
+        self._maybe_fail("liked_contains")
+        if len(tracks) > 40:
+            raise FakeSpotifyException(400)
+        return [u in self.liked for u in tracks]
 
 
 def install_fakes():
@@ -889,6 +907,137 @@ def test_hard_check_errors_block_execution():
         check("a plan with hard-check errors is refused before any call",
               code == runner.EXIT_HALT and sp.calls == [], f"exit {code}")
 
+
+
+# ---- Liked Songs ops ---- #
+
+GHOSTS = [f"spotify:track:g{i}" for i in range(3)]
+CANON = [f"spotify:track:c{i}" for i in range(2)]
+KEEP = "spotify:track:keep"
+
+
+def make_liked_plan() -> dict:
+    ops = [{"phase": 0, "action": "liked_check", "playlist_id_or_name": "liked-songs",
+            "playlist_name": "Liked Songs", "calls": 1},
+           {"phase": 2, "action": "save_liked", "playlist_id_or_name": "liked-songs",
+            "playlist_name": "Liked Songs", "uris": CANON, "count": len(CANON),
+            "chunk_index": 0, "chunks_total": 1, "calls": 2, "canary": True},
+           {"phase": 2.5, "action": "verify_liked_saved", "playlist_id_or_name": "liked-songs",
+            "playlist_name": "Liked Songs", "uris": CANON, "calls": 1},
+           {"phase": 3, "action": "unsave_liked", "playlist_id_or_name": "liked-songs",
+            "playlist_name": "Liked Songs", "uris": GHOSTS, "count": len(GHOSTS),
+            "chunk_index": 0, "chunks_total": 1, "calls": 2},
+           {"phase": 4, "action": "verify_liked", "playlist_id_or_name": "liked-songs",
+            "playlist_name": "Liked Songs", "calls": 1}]
+    return {"config_id": "liked-config", "chunk_size": 40, "pacing_seconds": 0.0,
+            "hard_check_errors": [], "playlists": {}, "new_playlists": [],
+            "op_totals": {"add_ops": 0, "remove_ops": 0},
+            "budget": {"total": {"calls_expected": 7, "write_calls": 2}},
+            "ops": ops, "expected_end_state": {}, "add_detail": {}, "remove_detail": {},
+            "liked_detail": {"save": [{"uri": u, "track": u} for u in CANON],
+                             "unsave": [{"uri": u, "track": u} for u in GHOSTS]}}
+
+
+def fresh_liked():
+    tmp = TemporaryDirectory()
+    sp = FakeSpotify({})
+    sp.liked = set(GHOSTS) | {KEEP}
+    return tmp, Path(tmp.name), sp
+
+
+def test_liked_swap_happy_path():
+    tmp, path, sp = fresh_liked()
+    with tmp:
+        code, out = run_plan(path, sp, plan=make_liked_plan())
+        check("liked: swap exits 0", code == 0, out[-400:])
+        check("liked: canonicals saved, ghosts removed, others untouched",
+              sp.liked == set(CANON) | {KEEP}, str(sp.liked))
+        writes = [c[0] for c in sp.writes()]
+        check("liked: the save precedes the removal",
+              writes == ["save_liked", "unsave_liked"], str(writes))
+
+
+def test_liked_drift_halts_before_writing():
+    for label, mutate in (("a removal target is no longer liked", lambda sp: sp.liked.discard(GHOSTS[0])),
+                          ("a save target is already liked", lambda sp: sp.liked.add(CANON[0]))):
+        tmp, path, sp = fresh_liked()
+        with tmp:
+            mutate(sp)
+            code, out = run_plan(path, sp, plan=make_liked_plan())
+            check(f"liked drift ({label}): exit DRIFT with no writes",
+                  code == runner.EXIT_DRIFT and not sp.writes(), f"exit {code} {out[-300:]}")
+
+
+def test_liked_save_that_does_not_land_blocks_removals():
+    tmp, path, sp = fresh_liked()
+    with tmp:
+        sp.ignore_saves = {CANON[1]}
+        code, out = run_plan(path, sp, plan=make_liked_plan())
+        check("liked: a save missing on read-back halts", code == runner.EXIT_HALT, f"exit {code}")
+        check("liked: no ghost is removed when a save did not land",
+              set(GHOSTS) <= sp.liked and "unsave_liked" not in [c[0] for c in sp.writes()],
+              str(sp.liked))
+
+
+def test_liked_save_read_back_alone_catches_a_lost_write():
+    tmp, path, sp = fresh_liked()
+    with tmp:
+        sp.ignore_saves = {CANON[1]}
+        code, out = run_plan(path, sp, plan=make_liked_plan(), phase=2)
+        lines = journal_lines(path)
+        check("liked: phase 2's own read-back halts a lost save (no gate involved)",
+              code == runner.EXIT_HALT and "did not change on read-back" in out,
+              f"exit {code} {out[-300:]}")
+        check("liked: the lost save is journalled not-done, so a resume re-checks it",
+              any(r.get("state") == "done" and r.get("ok") is False for r in lines))
+
+
+def test_liked_resume_after_unjournalled_save():
+    plan = make_liked_plan()
+    seq = next(i for i, o in enumerate(plan["ops"]) if o["action"] == "save_liked")
+    tmp, path, sp = fresh_liked()
+    with tmp:
+        jp = path / "apply_journal.jsonl"
+        sp.liked |= set(CANON)
+        j = runner.Journal(jp, "liked-config")
+        j.attempt(seq, plan["ops"][seq], runner.LIKED, uris=CANON)
+        code, out = run_plan(path, sp, plan=plan, journal=jp, resume=True)
+        check("liked resume: a landed save of UNKNOWN outcome is not drift",
+              "DRIFT" not in out, out[:500])
+        check("liked resume: it is verified by read-back and the swap completes",
+              code == 0 and "verified by read-back" in out and sp.liked == set(CANON) | {KEEP},
+              f"exit {code} {out[-400:]}")
+
+
+def test_liked_resume_mid_removal():
+    tmp, path, sp = fresh_liked()
+    with tmp:
+        jp = path / "apply_journal.jsonl"
+        sp.fail_once("unsave_liked", FakeSpotifyException(400))
+        code, _ = run_plan(path, sp, plan=make_liked_plan(), journal=jp)
+        check("liked: a failed removal halts", code == runner.EXIT_HALT, f"exit {code}")
+        code, out = run_plan(path, sp, plan=make_liked_plan(), journal=jp, resume=True)
+        check("liked: resuming finishes the removal from journalled saves",
+              code == 0 and sp.liked == set(CANON) | {KEEP}, f"exit {code} {out[-400:]}")
+
+
+def test_liked_phase3_alone_refuses_before_saves():
+    tmp, path, sp = fresh_liked()
+    with tmp:
+        code, out = run_plan(path, sp, plan=make_liked_plan(), phase=3)
+        check("liked: phase 3 alone runs the gate and refuses before any removal",
+              code == runner.EXIT_HALT and not sp.writes() and set(GHOSTS) <= sp.liked,
+              f"exit {code} {out[-300:]}")
+
+
+def test_liked_malformed_contains_is_a_read_failure():
+    tmp, path, sp = fresh_liked()
+    with tmp:
+        sp.current_user_saved_tracks_contains = lambda tracks=None: None
+        code, out = run_plan(path, sp, plan=make_liked_plan())
+        check("liked: an unreadable contains answer halts, not drift",
+              code == runner.EXIT_HALT and "DRIFT" not in out and not sp.writes(),
+              f"exit {code} {out[-300:]}")
 
 # --------------------------------------------------------------------------- #
 
