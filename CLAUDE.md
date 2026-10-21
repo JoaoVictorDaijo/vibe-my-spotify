@@ -33,6 +33,9 @@ server's spotipy client and token cache:
 - `dedup_report.py DIR` — exact/cross/fuzzy duplicate report (local, no API)
 - `enrich_exports.py DIR --skip-genres` — ReccoBeats energy/valence/tempo
   (always pass `--skip-genres`: dev-mode apps get empty artist genres)
+- `enrich_musicbrainz.py DIR` — artist genre tags from MusicBrainz (no Spotify
+  calls); writes `artists.txt` for judges + a `mb_artists.json` cache — keep
+  both in `curation-review/reference/`
 - `phantom_audit.py DIR` — read-only stale-URI detection (ISRC + relinking)
 - `dedup_review.py DIR OUT.md` — checkbox review file from dedup + ISRC evidence
 - `verdict_convergence.py A.txt B.txt OUT_PREFIX [--field verdict|fallback]` —
@@ -151,90 +154,52 @@ landscape (Tidal = designated escape hatch):
   playable-ghost evidence ladder (title + duration ±2s) applies only to
   playable rows.
 
-## The curation operation (roster + stages)
+## The roster and the workspace
 
-APPLIED 2026-07-30 (plan v2, verified 18/18): 17 active playlists + Liked
-Songs (~6.5k). Thematic: Ether 68 (pure shoegaze), Permanent Wave 258
-(SY/Fugazi/Pixies canon; owner keeps it big — TFC and Yuck stay), Dreamy 201
-(dreampop/slowcore), Dreamo 27 (heavy-gaze), Post-Punk 202, Indie Rock 103
-(synth block kept under scene reading), Garage Rock 145 (2000s revival;
-renamed **Post-Punk Revival** 2026-07-30, Strokes' Angles/Comedown Machine
-tracks moved to Indie Rock under the owner's album-aware principle).
-Archetypes created: Psychedelia 130, Heartland & Americana 89, Chamber Indie
-60 (grown to 73 and renamed **Chamber Pop** 2026-07-31 — the theme is the
-owner's band graph, National/Arcade Fire/Beirut/Whitney axis; see its vibe
-file), 90s Alternative 53, Laurel Canyon 49, Britpop 40 (owner-nurtured,
-under floor by choice). Overlay: Night Wave 18 (copies, dedup-exempt; Third Eye
-held this role until 2026-08-01). Open homes:
-Alternative Rock 101, Rock 109, Acoustic/Folk 76. Empty shell kept: 70's
-Sunday Rock (became Yacht Rock 2026-10-06, owner-renamed Soft 70's 2026-10-21). Joined post-apply (2026-07-30, owner request): New Wave /
-Synthwave 94 — a PRIMARY HOME for synth-flavored tracks, cleaned same day
-in two owner-ruled applied plans (dedup keepers, stray sweep, Julian
-Casablancas united there; Indie Rock kept its synth block minus
-Brothertiger). Full rulings: vibes/new-wave-synthwave.md. API quirk from
-the rename: `playlist_change_details` silently no-ops — use a raw
-`PUT playlists/{id}` with the full payload, and don't trust immediate GET
-read-backs of name/description (stale cache; verify in the app). Playlist
-adds reject dead URIs (unplayable, no relink) with a whole-batch 400 —
-filter phantoms out of every add list.
+The live roster — every playlist with its count, id and kind (archetype,
+open home, owner-nurtured standalone, overlay) — is the table in
+`curation-review/STATUS.md`, refreshed after every apply; counts here would
+only go stale. As of 2026-10-21: 23 playlists + Liked Songs (~6.4k), with
+Night Wave the one OVERLAY (copies, dedup-exempt), Alternative Rock and Rock
+the open homes, and Britpop, Slowcore and First Wave owner-nurtured under the
+≥50 floor. About 115 older owned playlists sit outside the roster (issue #14).
+The placement pipeline is the repo skill `.claude/skills/track-placement` —
+invoke it for any where-does-this-song-belong question.
 
-Completed cycles: dedup pass (2026-07-23), full rebalance + drain + clustering
-+ apply (2026-07-30), New Wave / Synthwave onboarding + Night Wave overlay
-(2026-07-30), PW trim 258 → 209 via two-Opus-judge convergence + owner
-toggles (2026-07-31; record in curation-review/pw-trim-proposal.md), Chamber
-Pop growth + rename (2026-07-31: Whitney ×8, band-graph theme, strays
-rehomed), psych-space restructure (2026-08-01: Third Eye promoted to
-standalone primary home at 48 — revival-scene bands only, 80s ancestors
-returned to their scene homes; Psychedelia refocused to the modern core at
-84; First Wave 17 created for the 1966–74 classics, owner-nurtured under
-floor), Dreamy split (2026-08-26: the slowcore half became the standalone
-**Slowcore** playlist, 46, owner-nurtured; Dreamy is the pure dreampop half;
-no "bridge" category — every row coalesces into a defined bin),
-Acoustic/Folk split (2026-10-06: **Folk** 44 created — folk canon, indie
-folk, acoustic blues; the old playlist renamed **Unplugged** 40 — acoustic
-versions of electric songs and hushed covers; 20 stretches rehomed),
-Yacht Rock (2026-10-06: built in the old 70's Sunday Rock shell — Steely
-Dan spine, US AOR, blue-eyed soul, UK sophisti-pop, modern revival; the
-owner then reshaped it into **Soft 70's** 73 — mellow 70s rock with groove,
-Steely Dan trimmed — see vibes/soft-70s.md; city pop and Brazilian AOR out). The
-placement pipeline these cycles converged on is codified as the repo skill
-`.claude/skills/track-placement` — invoke it for any
-where-does-this-song-belong question.
+Owner doctrines worth knowing before judging (full rulings per playlist in
+`curation-review/vibes/`):
+- scene bands classify album-aware (Strokes precedent); for PW the test is
+  sonic lineage (the Yuck gazey rule), not era;
+- Unplugged admits only acoustic VERSIONS of electric songs and hushed covers,
+  folk-genre songs live in Folk, and an originally-acoustic song stays with
+  its genre archetype; Indie Rock tolerates hushed songs by resident bands;
+- no "bridge" category — every row coalesces into a defined bin;
+- Soft 70's is mellow 70s rock with groove (the owner widened Yacht Rock by
+  hand), with yacht and sophisti-pop as its core, not its boundary.
 
-In flight (state in `curation-review/STATUS.md`): the Liked backfill is
-judged (two rounds, ~1.2k proposed adds) but its apply is held while the
-owner reviews album-likes. Backlog
-lives in GitHub issues (#2 umbrella, #1 Troi growth, #3–#9).
-Phantom/unplayable cleanup (203 tracks) parked. Owner doctrines
-worth knowing before judging: Unplugged admits only acoustic VERSIONS of
-electric songs and hushed covers, folk-genre songs live in Folk, and an
-originally-acoustic song stays with its genre archetype; Indie Rock tolerates hushed/slow songs by resident bands;
-scene bands classify album-aware (Strokes precedent), and for PW the test is
-sonic lineage (the Yuck gazey rule), not era.
+API quirks met in applies: `playlist_change_details` silently no-ops — rename
+with a raw `PUT playlists/{id}` and the full payload (it 400s with "You must
+follow the playlist" when the owner has unfollowed it); don't trust immediate
+GET read-backs of name/description. Playlist adds reject dead URIs
+(unplayable, no relink) with a whole-batch 400 — filter phantoms out of every
+add list.
 
 Every account write needs an explicitly owner-approved plan. Re-export before
-mutating — playlist state drifts. Live session state (exports, review files,
-applied vs parked) lives in the gitignored `curation-review/`.
-
-Durable state baseline: `curation-review/baseline/` holds the latest full
-export of every playlist (JSON + compact txt, plus liked-songs.json). Refresh
-it after every apply and diff future API pulls against it
-(`scripts/diff_baseline.py NEW_DIR` — reports adds/removals/moves per
-playlist). Scratchpad exports are working copies; the baseline is the source
-of truth between sessions. Roster counts above are as-verified at apply time
-— live state drifts with the owner's own listening; the baseline records
-reality.
-
-The learning loop: `curation-review/vibes/` holds per-playlist vibe profiles
-(theme, canon anchors, borders, owner rulings, expulsions) distilled from
-real operations — judgment jobs read them BEFORE judging, and owner
-hand-edits surfaced by the baseline diff are taste signals folded back in
-each cycle. `curation-review/verdicts/` archives raw judge outputs with
-reasons. The goal: each cycle makes the agent a better advisor on what is
-canonical per playlist.
+mutating — playlist state drifts. Live state lives in the gitignored
+`curation-review/` (layout in its STATUS.md):
+- `baseline/` holds the latest full export of every playlist (JSON + compact
+  txt, plus liked-songs.json). Refresh it after every apply and diff future
+  pulls against it (`scripts/diff_baseline.py NEW_DIR`). The baseline is the
+  source of truth between sessions.
+- `vibes/` is the learning loop: per-playlist profiles (theme, canon, borders,
+  owner rulings, expulsions) that judgment jobs read BEFORE judging; owner
+  hand-edits surfaced by the baseline diff are taste signals folded back in
+  each cycle.
+- `archive/<date>-<cycle>/` keeps each finished cycle's plan, journal, spec,
+  judge verdicts and drafts, so every decision stays traceable.
 
 Liked Songs caveat: old Spotify auto-liked every track of a liked album, so
-the ~6.5k Liked pool contains album-spam — a liked track is NOT reliable
+the Liked pool contains album-spam — a liked track is NOT reliable
 evidence of curated affection. Any Liked-driven pass (backfill, suggestions)
 must weigh this. The rule (owner, 2026-09-05): an album counts as a
 whole-album like when liked tracks / album tracks ≥ 75% (albums of ≥5

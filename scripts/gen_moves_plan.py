@@ -19,9 +19,9 @@ Spec (JSON):
      "registry": "uri-remaps.json", # optional
      "metadata": ["old-export.json"], # optional: track rows only, never playlists
      "create":  [{"name": "Folk", "description": "...", "public": true}],
-     "moves":   [{"uri": "...", "from": "Acoustic/Folk", "to": "Folk"}],
+     "moves":   [{"uri": "...", "from": "Rock", "to": "Soft 70's"}],
      "adds":    [{"uri": "...", "to": "Folk"}],          # e.g. from Liked
-     "removes": [{"uri": "...", "from": "Acoustic/Folk"}],
+     "removes": [{"uri": "...", "from": "Rock"}],
      "title_waivers": [{"to": "Laurel Canyon", "title": "Harvest Moon"}],
      "liked_saves":   ["spotify:track:..."],   # e.g. a ghost's canonical
      "liked_removes": ["spotify:track:..."]}   # e.g. the ghost itself

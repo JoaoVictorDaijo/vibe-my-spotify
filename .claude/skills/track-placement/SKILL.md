@@ -49,9 +49,9 @@ constraint set, not suggestions.
 4. **Owner doctrines trump everything**: unplayable rows are tombstones
    — never removed/unliked for being dead, swapped only for an
    ISRC-identical same-album republish, and never addable elsewhere (dead
-   URIs 400 the batch); Acoustic/Folk's two admission
-   lanes (special acoustic VERSIONS or folk-genre — an originally-acoustic
-   song stays with its genre archetype); Indie Rock tolerates hushed songs
+   URIs 400 the batch); Unplugged admits only acoustic VERSIONS of
+   electric songs and hushed covers, folk-genre songs live in Folk, and an
+   originally-acoustic song stays with its genre archetype; Indie Rock tolerates hushed songs
    by resident bands; overlays hold copies and are dedup-exempt; a demo is
    admissible as the only copy of its song, not beside its studio master
    (owner may override per band).
@@ -92,8 +92,9 @@ constraint set, not suggestions.
   `QUOTA_EXCEEDED`, no or long Retry-After — stops the run, a short
   Retry-After is slept out).
 - After verify: refresh the baseline for touched playlists, record the
-  rulings in the vibe files (arrivals, departures, new doctrines), archive
-  plan + journal + verdicts in `curation-review/`.
+  rulings in the vibe files (arrivals, departures, new doctrines), and keep
+  plan + journal + verdicts in the cycle's `curation-review/archive/<date>-<cycle>/`
+  folder (delete its working exports once the baseline is refreshed).
 
 ## Known API traps
 

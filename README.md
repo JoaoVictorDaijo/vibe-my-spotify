@@ -37,8 +37,9 @@ All state lives in a local, gitignored `curation-review/` folder:
   Liked Songs. A diff tool ([scripts/diff_baseline.py](scripts/diff_baseline.py))
   detects the owner's hand-edits between sessions — those are treated as
   taste signals and folded back into the vibes each cycle.
-- **Verdict & proposal archives** — raw judge outputs and converged
-  proposals are kept, so every decision has a traceable record.
+- **Cycle archives** — each finished cycle keeps its plan, journal, judge
+  verdicts and drafts in its own folder, so every decision has a traceable
+  record.
 
 The goal: each cycle the system gets measurably better at knowing what is
 canonical for each playlist — good enough to advise, eventually to suggest.
@@ -101,7 +102,7 @@ re-add songs, edition dups breed. The toolkit:
 | [.claude/skills/track-placement](.claude/skills/track-placement/SKILL.md) | The placement pipeline as a reusable skill |
 | [docs/](docs/) | Rate-limit playbook, alternatives landscape, operation learnings |
 | [spotify-mcp/](spotify-mcp/) | Vendored MCP server: upstream v0.7.0 + one local patch (see [VENDORED.md](spotify-mcp/VENDORED.md)) |
-| `curation-review/` | Gitignored: baselines, vibes, verdicts, registries — personal listening data stays local |
+| `curation-review/` | Gitignored: baselines, vibes, registries, per-cycle archives — personal listening data stays local |
 
 ## Requirements
 
