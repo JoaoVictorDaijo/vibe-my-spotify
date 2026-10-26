@@ -33,9 +33,17 @@ server's spotipy client and token cache:
 - `dedup_report.py DIR` — exact/cross/fuzzy duplicate report (local, no API)
 - `enrich_exports.py DIR --skip-genres` — ReccoBeats energy/valence/tempo
   (always pass `--skip-genres`: dev-mode apps get empty artist genres)
-- `enrich_musicbrainz.py DIR` — artist genre tags from MusicBrainz (no Spotify
-  calls); writes `artists.txt` for judges + a `mb_artists.json` cache — keep
-  both in `curation-review/reference/`
+- `enrich_genres.py [--include-liked]` — the genre evidence judges read, in
+  one command: MusicBrainz tags (`artists.txt`) then ListenBrainz scene
+  graphs (`similar.txt`) for every roster artist, into
+  `curation-review/reference/`. Run it after every baseline refresh: it
+  fetches only new or stale artists (minutes; the first run proves every
+  identity by ISRC and takes about an hour). The two halves also run alone as
+  `enrich_musicbrainz.py DIR --out REF` and `enrich_listenbrainz.py DIR --out REF`
+- `lastfm_tags.py curation-review/reference "Artist – Title @ Album" ...` —
+  on-demand Last.fm artist/album/track tags for doubtful rows only, above all
+  artists with no MusicBrainz tags (needs `LASTFM_API_KEY` in .env; 100 MB
+  terms cap, so never a library-wide crawl). Album tags are the useful level.
 - `phantom_audit.py DIR` — read-only stale-URI detection (ISRC + relinking)
 - `dedup_review.py DIR OUT.md` — checkbox review file from dedup + ISRC evidence
 - `verdict_convergence.py A.txt B.txt OUT_PREFIX [--field verdict|fallback]` —
@@ -48,6 +56,23 @@ server's spotipy client and token cache:
 - `apply_plan_runner.py PLAN --journal J` — executes an owner-approved plan,
   playlists and Liked Songs alike (Liked writes are proven by a
   `/me/library/contains` read-back, since Liked has no snapshot_id)
+
+The open-data scripts run with plain `python3` from the repo root (no
+Spotify, no `spotify-mcp/`, no LLM tokens; source `.env` first for Last.fm)
+and share `scripts/open_data_client.py`: 1.1 s pace per service, 429s split
+like Spotify's (≤ 300 s wait = sleep, else stop), Last.fm body errors 29/26
+stop the run, and only real answers are cached. Rules learned the hard way:
+- **Identity before evidence.** Artists are proved through a track's ISRC;
+  name search accepts exact names only. Trusting MusicBrainz's search score
+  once made Beck "Rufus Beck" and Whitney "Whitney Houston", and every tag and
+  neighbour downstream came from the wrong artist.
+- **One run per service.** Each script locks its service in the output dir;
+  never work around a refusal. In sandboxed sessions `ps` may not see a
+  background run — check its log or `/proc`, don't relaunch.
+- Long runs belong in the background with an unbuffered log
+  (`python3 -u ... > LOG`), and a waiter on the log, not a sleep loop.
+Sources, limits, terms and measured value:
+[docs/genre-sources.md](docs/genre-sources.md).
 
 Every Spotify call in these scripts goes through `apply_plan_runner.Api`:
 one request per 2 s, 429s classified per the rule below, and a shared daily
@@ -96,6 +121,11 @@ landscape (Tidal = designated escape hatch):
   [docs/operation-learnings.md](docs/operation-learnings.md)).
 - **Opus does all judgment**: classification, drains, clustering, proposals,
   plan design, and adversarial review rounds.
+- **Sol via Codex is a measured substitute judge** when Claude limits bite:
+  on placement test v2 it scored within a point of Opus and agreed with it on
+  45 of 52 tracks (docs/genre-sources.md). Give it the same files and
+  prompt, and run it in a folder holding only the judge inputs, never the
+  answer key.
 - **A single Fable agent is the standing final conciliator** — synthesizer /
   advisor / reviewer merging multi-agent findings, arbitrating conflicts,
   and checking the whole before anything reaches the owner.
@@ -174,6 +204,9 @@ Owner doctrines worth knowing before judging (full rulings per playlist in
   folk-genre songs live in Folk, and an originally-acoustic song stays with
   its genre archetype; Indie Rock tolerates hushed songs by resident bands;
 - no "bridge" category — every row coalesces into a defined bin;
+- the most specific home wins: when a track fits a more specific playlist,
+  keep it there rather than in a broader one (owner, 2026-10-26: T. Rex and
+  U2 stay in Alternative Rock even though both judge models chose Rock);
 - Soft 70's is mellow 70s rock with groove (the owner widened Yacht Rock by
   hand), with yacht and sophisti-pop as its core, not its boundary.
 

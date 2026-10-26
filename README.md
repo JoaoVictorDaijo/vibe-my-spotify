@@ -15,7 +15,10 @@ owner-approved pipeline is codified as a repo skill
 ([.claude/skills/track-placement](.claude/skills/track-placement/SKILL.md)):
 
 1. **Ground mechanically first** — locate the track everywhere (playlists,
-   Liked, exports), pull URI/ISRC/duration evidence. Zero LLM tokens.
+   Liked, exports), pull URI/ISRC/duration evidence, and read the open-data
+   genre evidence: MusicBrainz tags, ListenBrainz similar artists mapped onto
+   the roster, and Last.fm tags for doubtful rows
+   ([docs/genre-sources.md](docs/genre-sources.md)). Zero LLM tokens.
 2. **Read the vibes** — per-playlist profiles carry the accumulated rulings;
    judgment never re-derives a settled border.
 3. **Judge by the band graph** — playlists are scene-bubbles, not
@@ -76,6 +79,31 @@ re-add songs, edition dups breed. The toolkit:
   tracks are tombstones (never deleted — they may return); re-like date
   resets are protected by an archived, dated Liked snapshot.
 
+### Genre evidence (free open data, zero tokens)
+Spotify's dev mode gives no artist genres, related artists or audio
+features, so the judges get their genre-space evidence from open services
+instead ([docs/genre-sources.md](docs/genre-sources.md)):
+
+- **MusicBrainz** artist tags → `artists.txt`. Each artist's identity is
+  proved through the ISRC of one of their tracks, so "Beck" is Beck and not
+  Rufus Beck.
+- **ListenBrainz** similar artists → `similar.txt`: who gets played next to
+  whom, mapped onto your own playlists ("Tamaryn: Slowdive [Dreamy]; DIIV
+  [Ether] … || roster pull: Dreamy 4, Ether 2"). This answers the band-graph
+  question tags can't.
+- **Last.fm** artist/album/track tags, on demand for doubtful rows (free key).
+
+One command keeps the first two current after each export:
+
+    python3 scripts/enrich_genres.py
+
+No keys and no Spotify calls. The first run takes about an hour, because
+MusicBrainz allows about one request per second; later runs take minutes.
+Each service is rate-limited, retried and locked by
+[scripts/open_data_client.py](scripts/open_data_client.py), so a script can't
+get your IP blocked or cache a failure as "no data". How much each source
+improves placement, measured on already-placed tracks, is in the doc.
+
 ### Token & API economy
 - Mechanical work is plain scripts — never a model. Models only judge.
 - Judgment reads compact `pos | artist – title` exports, not raw API JSON.
@@ -98,9 +126,9 @@ re-add songs, edition dups breed. The toolkit:
 | Path | What |
 |---|---|
 | [CLAUDE.md](CLAUDE.md) | The operating guide: policies, doctrines, roster, API notes — auto-loaded every session |
-| [scripts/](scripts/) | Zero-token mechanics: export, dedup, diff, enrich, phantom audit, two-judge verdict convergence, the spec-to-plan generator, the journaled apply runner + its test suite |
+| [scripts/](scripts/) | Zero-token mechanics: export, dedup, diff, genre evidence (MusicBrainz / ListenBrainz / Last.fm), phantom audit, two-judge verdict convergence, the spec-to-plan generator, the journaled apply runner, and their test suites |
 | [.claude/skills/track-placement](.claude/skills/track-placement/SKILL.md) | The placement pipeline as a reusable skill |
-| [docs/](docs/) | Rate-limit playbook, alternatives landscape, operation learnings |
+| [docs/](docs/) | Rate-limit playbook, genre-evidence sources and their limits, alternatives landscape, operation learnings |
 | [spotify-mcp/](spotify-mcp/) | Vendored MCP server: upstream v0.7.0 + one local patch (see [VENDORED.md](spotify-mcp/VENDORED.md)) |
 | `curation-review/` | Gitignored: baselines, vibes, registries, per-cycle archives — personal listening data stays local |
 
@@ -109,6 +137,8 @@ re-add songs, edition dups breed. The toolkit:
 - Spotify **Premium** (required for Spotify dev-mode apps since Feb 2026)
 - A Spotify app from the [developer dashboard](https://developer.spotify.com/dashboard) — Web API only, redirect URI `http://127.0.0.1:8080/callback`
 - [uv](https://docs.astral.sh/uv/), Claude Code
+- Python 3.10+ with `requests` for the open-data scripts (or prefix them with
+  `uv run --with requests`)
 
 ## Setup
 
@@ -117,6 +147,14 @@ re-add songs, edition dups breed. The toolkit:
    ```
    CLIENT_ID=your_spotify_client_id
    CLIENT_SECRET=your_spotify_client_secret
+   ```
+
+   Optional, for on-demand Last.fm tags: a free key from
+   <https://www.last.fm/api/account/create> (the API key only, not the shared
+   secret):
+
+   ```
+   LASTFM_API_KEY=your_lastfm_api_key
    ```
 
 2. One-time OAuth (opens your browser, or prints the URL to visit):
@@ -129,6 +167,13 @@ re-add songs, edition dups breed. The toolkit:
    vendored server): a cached token never gains new scopes on its own.
 
 3. Open the project in Claude Code and approve the `spotify` MCP server when prompted ([.mcp.json](.mcp.json) registers it; [run-server.sh](run-server.sh) launches it).
+
+4. After your first export, build the genre evidence (about an hour the
+   first time, minutes after that):
+
+   ```
+   python3 scripts/enrich_genres.py
+   ```
 
 ## Credits
 
