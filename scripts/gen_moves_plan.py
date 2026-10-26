@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import unicodedata
 from collections import Counter, defaultdict
 from datetime import date
 from pathlib import Path
@@ -46,8 +47,12 @@ def norm_title(title: str) -> str:
     """Fold edition noise so 'Song - 2011 Remaster' and 'Song (Live)' compare equal.
 
     Letters of every script survive: an ASCII-only fold erased Japanese titles to ""
-    and made each one a twin of every other."""
-    t = re.sub(r"\s*[-(\[].*$", "", (title or "").lower())
+    and made each one a twin of every other. NFKC first, because Spotify serves the
+    same kana or accent both precomposed and as base + combining mark, and \\w
+    drops a lone combining mark. A leading parenthesis is part of the title, not
+    edition noise ('(I Can't Get No) Satisfaction')."""
+    t = unicodedata.normalize("NFKC", title or "").lower()
+    t = re.sub(r"(?<=.)\s*[-(\[].*$", "", t)
     return re.sub(r"[^\w ]|_", "", t).strip()
 
 
