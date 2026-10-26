@@ -24,6 +24,22 @@ Before any opinion, gather the facts from local exports
   "Light Upon the Lake" trap) and demo/live/acoustic variants.
 - Detect owner drift: diff fresh exports against the baseline; owner
   hand-edits are taste signals, never noise.
+- Pull the genre evidence from `curation-review/reference/` (refresh it with
+  `python3 scripts/enrich_genres.py` if the baseline changed): `artists.txt`
+  (MusicBrainz tags) and `similar.txt` (ListenBrainz neighbours with the
+  roster playlists they live in, plus a "roster pull" count). Give judges
+  only the lines for the artists in question. When a row stays doubtful
+  (no tags, a split pull, a band whose catalogue straddles two homes), run
+  `python3 scripts/lastfm_tags.py curation-review/reference "Artist – Title @ Album"`
+  (with .env loaded) on just those rows: album
+  tags split a band's eras, and they're often the only tags a small artist has.
+  Measured (docs/genre-sources.md): with full profiles and ISRC-proved
+  identities, MusicBrainz tags alone placed ~80% of unseen-artist tracks.
+  Adding neighbours or Last.fm to every row didn't help on average and broke a
+  few rows, so give them to the judge only for doubtful rows.
+  All of this is evidence, never a verdict: a popular band's graph is broad,
+  and the membership test below still decides. Sources and limits:
+  `docs/genre-sources.md`.
 
 ## 2. Read the vibes before judging
 
@@ -36,7 +52,8 @@ constraint set, not suggestions.
 ## 3. The membership test, in order
 
 1. **Band graph first**: does the BAND live in the playlist's
-   scene/ecosystem graph? Playlists are scene-bubbles (the owner thinks in
+   scene/ecosystem graph? (`similar.txt` shows which roster playlists
+   its listening neighbours already sit in.) Playlists are scene-bubbles (the owner thinks in
    band clusters), not surface-feature buckets. Judging by instrumentation
    or production surface produces false positives (the Mercury Rev
    lesson: "symphonic" ≠ in-the-chamber-graph).
