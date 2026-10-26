@@ -43,9 +43,12 @@ PAGE = 100
 
 
 def norm_title(title: str) -> str:
-    """Fold edition noise so 'Song - 2011 Remaster' and 'Song (Live)' compare equal."""
+    """Fold edition noise so 'Song - 2011 Remaster' and 'Song (Live)' compare equal.
+
+    Letters of every script survive: an ASCII-only fold erased Japanese titles to ""
+    and made each one a twin of every other."""
     t = re.sub(r"\s*[-(\[].*$", "", (title or "").lower())
-    return re.sub(r"[^a-z0-9 ]", "", t).strip()
+    return re.sub(r"[^\w ]|_", "", t).strip()
 
 
 def chunks(items: list, size: int = CHUNK) -> list[list]:
@@ -177,12 +180,13 @@ def build(spec: dict) -> tuple[dict | None, list[str]]:
             if isrc and isrc in have_isrc:
                 errors.append(f"{dest}: ISRC twin {label(t)} = {label(have_isrc[isrc])}")
             key = norm_title(t["name"])
-            if key in have_title and (dest, key) not in waived:
+            if key and key in have_title and (dest, key) not in waived:
                 errors.append(f"{dest}: title twin {label(t)} ~ {label(have_title[key])}")
             have_uri.add(u)
             if isrc:
                 have_isrc[isrc] = t
-            have_title.setdefault(key, t)
+            if key:
+                have_title.setdefault(key, t)
 
     saves, unsaves = spec.get("liked_saves", []), spec.get("liked_removes", [])
     if saves or unsaves:
